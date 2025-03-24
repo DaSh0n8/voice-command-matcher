@@ -1,0 +1,4 @@
+config.py
+.env
+*.log
+.DS_Store
