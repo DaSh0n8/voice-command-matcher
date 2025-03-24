@@ -21,6 +21,7 @@ def speech_to_text():
     except:
         print("Sorry, I didn't understand.")
 
+# Remove later, change to button on frontend 
 SAMPLE_RATE = 44100  
 DURATION = 4  
 OUTPUT_FILE = "live_audio.wav"  
@@ -56,29 +57,42 @@ def speech_to_text_3():
 
     return result["text"]
 
-
-
-result = speech_to_text_3()
+#result = speech_to_text_3()
 
 #speech_to_text()
 
 nlp = spacy.load("en_core_web_sm")
 matcher = Matcher(nlp.vocab)
 
+# Action patterns to be recognized 
 action_patterns = [
-    [{"LOWER": "shrink"}], [{"LOWER": "reduce"}], [{"LOWER": "hide"}], 
-    [{"LOWER": "move"}], [{"LOWER": "duplicate"}], [{"LOWER": "scale"}, {"LOWER": "down"}],
-    [{"LOWER": "delete"}], [{"LOWER": "start"}], [{"LOWER": "save"}]
+    [{"LOWER": "shrink"}], [{"LOWER": "reduce"}], [{"LOWER": "hide"}], [{"LOWER": "move"}], 
+    [{"LOWER": "duplicate"}], [{"LOWER": "scale"}, {"LOWER": "down"}], [{"LOWER": "remove"}],
+    [{"LOWER": "delete"}], [{"LOWER": "start"}], [{"LOWER": "save"}], [{"LOWER": "select"}],
+    [{"LOWER": "pin"}]
 ]
 matcher.add("ACTION", action_patterns)
 
+# Direction patterns for move command 
+direction_patterns = [
+    [{"LOWER": "left"}], [{"LOWER": "right"}], [{"LOWER": "up"}], [{"LOWER": "down"}],
+    [{"LOWER": "to"}, {"LOWER": "the"}, {"LOWER": "left"}], 
+    [{"LOWER": "to"}, {"LOWER": "the"}, {"LOWER": "right"}],
+]
+matcher.add("DIRECTION", direction_patterns)
 
+# Idenitfying layer (id?)
 layer_patterns = [
+    [{"LOWER": "layer"}, {"IS_ALPHA": True, "OP": "+"}],  
+    [{"LOWER": "the"}, {"IS_ALPHA": True, "OP": "+"}, {"LOWER": "layer"}],
     [{"LOWER": "layer"}, {"IS_DIGIT": True}], 
-    [{"LOWER": "the"}, {"ENT_TYPE": "ORDINAL"}, {"LOWER": "layer"}], 
+    [{"LOWER": "the"}, {"ENT_TYPE": "ORDINAL"}, {"LOWER": "layer"}],
+    [{"LOWER": "layer"}, {"TEXT": {"REGEX": "^[A-Za-z0-9 ]+$"}, "OP": "+"}],  
+    [{"LOWER": "the"}, {"TEXT": {"REGEX": "^[A-Za-z0-9 ]+$"}, "OP": "+"}, {"LOWER": "layer"}]
 ]
 matcher.add("LAYER", layer_patterns)
 
+# Values like % or pixels in command
 parameter_patterns = [
     [{"LOWER": "by"}, {"LIKE_NUM": True}, {"TEXT": {"REGEX": "%|px|pixels"}}],
     [{"LIKE_NUM": True}, {"TEXT": {"REGEX": "%|px"}}],  
@@ -106,5 +120,20 @@ def parse_command(command):
 
     return extracted
 
-print(result)
-print(parse_command(result))
+def command_to_function(command):
+    if command["action"] == "save":
+        return 
+    elif command["action"] == "select" and command["layer"]:
+        print("Selecting layer" + command["layer"])
+    elif command["action"] == "select" and not command["layer"]:
+        # Retrieve list of layers, and then ask which one
+        print("Which layer?")
+    elif (command["action"] == "remove" or command["action"] == "delete") and command["layer"]:
+        print("Removing layer" + command["layer"])
+    elif command["action"] == "pin" and command["layer"]:
+        print("Pinning layer" + command["layer"])
+
+result = "select the layer image test"
+parsed = parse_command(result)
+print(parsed)
+command_to_function(parsed)

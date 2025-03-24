@@ -1,0 +1,884 @@
+import socket
+import json
+import pvporcupine  
+import pyaudio
+import time
+import speech_recognition as sr
+import sounddevice as sd
+import numpy as np
+import scipy.io.wavfile as wav
+import whisper
+import spacy
+import string
+import threading
+import re
+from spacy.matcher import Matcher
+
+# Load configuration from config.json
+def load_config():
+    with open("config.json", "r") as file:
+        return json.load(file)
+
+# Initialize config variables
+config = load_config()
+IGLOO_SERVER_IP = config["IGLOO_SERVER_IP"]
+IGLOO_SERVER_PORT = config["IGLOO_SERVER_PORT"]
+API_KEY = config["API_KEY"]
+SERVER_ADDRESS = (IGLOO_SERVER_IP, IGLOO_SERVER_PORT)
+
+# Access key for porcupine
+ACCESS_KEY = "Qvzec8n0OXf26c/lJCoyxdIEUEinZW64C0MercOCf2R1p5QY5+9qOQ=="
+
+WAKE_WORD_PATH = "Hey-Igloo_en_mac_v3_0_0/Hey-Igloo_en_mac_v3_0_0.ppn"  
+
+porcupine = pvporcupine.create(
+    access_key=ACCESS_KEY,  
+    keyword_paths=[WAKE_WORD_PATH]  
+)  
+
+pa = pyaudio.PyAudio()
+
+# Open an audio stream for wake word detection
+audio_stream = pa.open(
+    rate=porcupine.sample_rate,
+    channels=1,
+    format=pyaudio.paInt16,
+    input=True,
+    frames_per_buffer=porcupine.frame_length
+)
+
+def listen_for_wake_word():
+    """
+    Continuously listens for the wake word using Porcupine.
+    """
+    # Retrieving session id and name
+    global current_session_id, current_session_name
+
+    sessions = get_session_list()
+    if sessions:
+        current_session_id, current_session_name = next(iter(sessions.items()))
+    else:
+        current_session_id, current_session_name = None, None
+
+    print("Listening for wake word 'Hey Igloo'...")
+
+    while True:
+        pcm = np.frombuffer(audio_stream.read(porcupine.frame_length, exception_on_overflow=False), dtype=np.int16)
+        keyword_index = porcupine.process(pcm)
+
+        if keyword_index >= 0:
+            print("🎤 Wake word detected!")
+            command_loop() 
+            print("🔕 Returning to sleep mode...")
+
+current_session_id = None
+current_session_name = None
+layer_dict = {}
+
+SAMPLE_RATE = 44100  
+DURATION = 4  
+OUTPUT_FILE = "live_audio.wav"  
+
+def start_background_services():
+    layer_thread = threading.Thread(target=listen_for_all_layer_changes, daemon=True)
+    
+    wake_thread = threading.Thread(target=listen_for_wake_word, daemon=True)
+
+    layer_thread.start()
+    wake_thread.start()
+
+    wake_thread.join()
+
+def command_loop():
+    """
+    Continuously listens for commands for 4-second intervals.
+    Exits loop if no valid command is detected.
+    """
+    print("Entering command mode (say a command)...")
+
+    while True:
+        speech_string = speech_to_text()
+
+        if not speech_string.strip():
+            print("No speech detected. Returning to sleep mode.")
+            break
+
+        parsed = parse_command(speech_string)
+        print(parsed)
+
+        if not parsed["layer"] and not parsed["action"]:
+            print("Command not understood. Returning to sleep mode.")
+            break
+
+        command_to_function(parsed)
+        print("Command executed. Listening for more... (or go silent to exit)")
+
+def record_audio():
+    """
+    Records user speech and turns it into a .wav file
+    Uses default microphone, and records for a set duration
+    """   
+    print("Say something:")
+    
+    audio_data = sd.rec(int(SAMPLE_RATE * DURATION), samplerate=SAMPLE_RATE, channels=1, dtype='int16')
+    sd.wait()  
+
+    wav.write(OUTPUT_FILE, SAMPLE_RATE, audio_data)
+
+def speech_to_text(): 
+    """
+    Converts speech to text using specified model
+    """   
+    record_audio()
+
+    # Change to other models by doing load_model("tiny") 
+    model = whisper.load_model("base")
+
+    result = model.transcribe(OUTPUT_FILE, language="en")
+    
+    print("You said:", result["text"])
+
+    return result["text"].lower()
+
+nlp = spacy.load("en_core_web_sm")
+matcher = Matcher(nlp.vocab)
+
+# Action patterns to be recognized 
+action_patterns = [
+    [{"LOWER": "hide"}], [{"LOWER": "unhide"}], [{"LOWER": "move"}], [{"LOWER": "duplicate"}],
+    [{"LOWER": "remove"}], [{"LOWER": "delete"}], [{"LOWER": "start"}], [{"LOWER": "save"}], 
+    [{"LOWER": "select"}], [{"LOWER": "pin"}], [{"LOWER": "unpin"}], [{"LOWER": "snap"}], 
+    [{"LOWER": "lock"}], [{"LOWER": "enable"}], [{"LOWER": "disable"}], [{"LOWER": "zoom"}],
+    [{"LOWER": "play"}],
+]
+matcher.add("ACTION", action_patterns)
+
+# PARAMETER patterns
+parameter_patterns = [
+    [{"LOWER": "by"}, {"LIKE_NUM": True}, {"TEXT": {"REGEX": "%|px|pixels"}}], 
+    [{"LIKE_NUM": True}, {"TEXT": {"REGEX": "%|px"}}],  
+    [{"LOWER": "half"}, {"LOWER": "size"}], 
+    [{"LOWER": "session"}],  
+    [{"LOWER": "region"}, {"LIKE_NUM": True}], 
+]
+matcher.add("PARAMETER", parameter_patterns)
+
+def clean_text(text):
+    """
+    Cleans text by removing punctuation (except spaces) and converting to lowercase.
+    """
+    return re.sub(r"[^\w\s]", "", text.lower()).strip()
+
+def find_best_layer_match(doc_text, layer_dict):
+    """
+    Uses a sliding window approach to find match starting from highest word count (window size) in dictionary,
+    because if we have both 'Deloitte Tech Summary' and 'Tech Summary' in the dictionary, and we're looking 
+    for 'Deloitte Tech Summary', 'Tech Summary' will be found first as a match if we start from 
+    lowest word count to highest.
+
+    doc_test (str): Command spoken by user
+    layer_dict (dict): A dictionary containing layer_name as key, and layer_id as value
+    """
+    words = clean_text(doc_text).split()
+    max_n = max(len(layer.split()) for layer in layer_dict) if layer_dict else 1  
+
+    for window_size in range(max_n, 0, -1):
+        for i in range(len(words) - window_size + 1):
+            candidate = " ".join(words[i : i + window_size]).strip()  
+
+            if candidate in layer_dict:  
+                return layer_dict[candidate]  
+
+    return None 
+
+def process_numeric_value(value):
+    """
+    Converts extracted values like "50%" or "20px" into integers.
+
+    value (str): Raw extracted value 
+    """
+    match = re.match(r"(\d+)", value) 
+    return int(match.group(1)) if match else None
+
+def parse_command(command):
+    """
+    Extracts the action, layer, and value from a speech command.
+
+    command (str): Command spoken by user
+    """
+    doc = nlp(command)
+    matches = matcher(doc)
+
+    extracted = {"action": None, "layer": None, "value": None}
+
+    for match_id, start, end in matches:
+        label = nlp.vocab.strings[match_id]  
+        entity_text = doc[start:end].text.strip().lower()
+
+        if label == "ACTION":
+            extracted["action"] = entity_text
+        elif label == "PARAMETER":
+            extracted["value"] = entity_text
+    
+    if extracted["value"]:
+        extracted["value"] = process_numeric_value(extracted["value"])
+
+    best_layer_match = find_best_layer_match(command, layer_dict)
+    if best_layer_match:
+        extracted["layer"] = best_layer_match 
+
+    return extracted
+
+def get_layer_id(layer_name):
+    """
+    Retrieves a layer's id 
+
+    layer_name (string): Name of a layer, parsed from user speech
+    """
+    return layer_dict.get(layer_name, "No such layer.")
+
+def command_to_function(command):
+    """
+    Determines what function to call depending on the values of each command.
+
+    command (dict): A dict containing a command's action, layer and value
+    """
+    if command["action"] == "save" and command["value"] == "session":
+        print("saving as:" + current_session_name)
+        save_session(current_session_name)
+    elif command["action"] == "select" and command["layer"]:
+        select_layer(command["layer"])
+    elif (command["action"] == "remove" or command["action"] == "delete") and command["layer"]:
+        remove_layer(command["layer"])
+    elif command["action"] == "pin" and command["layer"]:
+        set_layer_pin(command["layer"], True)
+    elif command["action"] == "unpin" and command["layer"]:
+        set_layer_pin(command["layer"], False)
+    elif command["action"] == "lock" and command["layer"]:
+        set_layer_lock(command["layer"], True)
+    elif command["action"] == "unlock" and command["layer"]:
+        set_layer_lock(command["layer"], False)
+    elif (command["action"] == "enable" or command["action"] == "unhide") and command["layer"]:
+        set_layer_visibility(command["layer"], True)
+    elif (command["action"] == "disable" or command["action"] == "hide") and command["layer"]:
+        set_layer_visibility(command["layer"], False)
+    elif command["action"] == 'play' and command["layer"]:
+        play_video(command["layer"])
+    elif command["action"] == 'zoom' and command["layer"] and command["value"]:
+        set_layer_scale(command["layer"], command["value"], True)
+    else:
+        print("Don't understand command")
+
+def get_session_list():
+    """
+    Retrieves all sessions' ID and name, stores them in session_data.
+    """
+    global session_data  
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    client_socket.settimeout(2)
+
+    try:
+        auth_command = f"apikey?value={API_KEY}"
+        client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
+        time.sleep(1)
+
+        session_list_command = "sessionList/get"
+        client_socket.sendto(session_list_command.encode(), SERVER_ADDRESS)
+        print(f"Sent command: {session_list_command}")
+
+        responses = []
+        start_time = time.time()
+
+        while time.time() - start_time < 5:
+            try:
+                response, _ = client_socket.recvfrom(4096)
+                response_str = response.decode("utf-8", errors="ignore")
+                print(f"Received Response: {response_str}")
+                responses.append(response_str)
+
+                if "sessionList/get" in response_str:
+                    break
+
+            except socket.timeout:
+                print("No additional response, retrying...")
+                client_socket.sendto(session_list_command.encode(), SERVER_ADDRESS)
+
+        if "session_data" not in globals():
+            session_data = {}
+
+        # Store session list
+        session_data.clear()
+        for response_str in responses:
+            if "sessionList/get" in response_str:
+                parts = response_str.split("id=")[1:]  
+                for part in parts:
+                    session_info = part.strip().split("+")  
+                    session_id = session_info[0]  
+
+                    # Extract everything after "name=" as the session name
+                    session_name = "Unnamed Session"
+                    name_index = next((i for i, val in enumerate(session_info) if val.startswith("name=")), None)
+                    if name_index is not None:
+                        session_name = session_info[name_index].replace("name=", "")  # Remove "name="
+                        session_name += " " + " ".join(session_info[name_index + 1:])  # Append the rest
+
+                    session_data[session_id] = session_name.strip()  
+                break  
+
+        return session_data
+
+    except socket.timeout:
+        print("No response received from ICE. Check if sessions exist.")
+        return {}
+
+    finally:
+        client_socket.close()
+
+def listen_for_all_layer_changes():
+    """
+    Authenticates, fetches initial layer list, subscribes to name updates,
+    and continuously listens for all changes (add, remove, rename).
+    Updates global `layer_dict` accordingly.
+    """
+    global layer_dict
+
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    client_socket.settimeout(5)
+
+    try:
+        # Authenticate
+        client_socket.sendto(f"apikey?value={API_KEY}".encode(), SERVER_ADDRESS)
+        time.sleep(1)
+
+        # Subscribe to layer list updates
+        client_socket.sendto("layerList/subscribe".encode(), SERVER_ADDRESS)
+        print("✅ Subscribed to layer list...")
+
+        # Request initial layer list
+        client_socket.sendto("layerList/get".encode(), SERVER_ADDRESS)
+
+        known_layer_ids = set()
+        id_to_name = {}  # {layer_id: cleaned_name}
+        subscribed_to_name_ids = set()
+
+        while True:
+            try:
+                response, _ = client_socket.recvfrom(8192)
+                response_str = response.decode("utf-8", errors="ignore")
+
+                # Handle layerList updates
+                if "layerList/get" in response_str:
+                    parts = response_str.split("id=")[1:]
+                    current_layer_ids = set()
+
+                    for part in parts:
+                        layer_info = part.strip().split("+")
+                        layer_id = layer_info[0]
+
+                        # Get name and type
+                        name_value = [x.replace("name=", "") for x in layer_info if x.startswith("name=")]
+                        type_value = [x.replace("type=", "") for x in layer_info if x.startswith("type=")]
+
+                        raw_name = name_value[0] if name_value else "Unnamed Layer"
+                        layer_type = type_value[0] if type_value else "Unknown"
+
+                        # If name is like "Layer1", use type instead
+                        if raw_name == "Layer1":
+                            raw_name = layer_type[0] + layer_type[1:].lower()
+
+                        cleaned_name = clean_text(raw_name)
+
+                        current_layer_ids.add(layer_id)
+
+                        # Update global dict
+                        old_name = id_to_name.get(layer_id)
+                        if old_name and old_name in layer_dict:
+                            del layer_dict[old_name]
+
+                        id_to_name[layer_id] = cleaned_name
+                        layer_dict[cleaned_name] = layer_id
+
+                        # Subscribe to name updates (if not already)
+                        if layer_id not in subscribed_to_name_ids:
+                            sub_cmd = f"layer/general/name/subscribe?id={layer_id}"
+                            client_socket.sendto(sub_cmd.encode(), SERVER_ADDRESS)
+                            subscribed_to_name_ids.add(layer_id)
+                            print(f"Subscribed to name changes for {layer_id}")
+
+                    # Detect added/removed layers
+                    added = current_layer_ids - known_layer_ids
+                    removed = known_layer_ids - current_layer_ids
+
+                    if added:
+                        print("Layers Added:")
+                        for layer_id in added:
+                            name = id_to_name[layer_id]
+                            print(f" - ID: {layer_id}, Name: {name}")
+
+                    if removed:
+                        print("Layers Removed:")
+                        for layer_id in removed:
+                            name = id_to_name.get(layer_id, "Unknown")
+                            print(f" - ID: {layer_id}, Name: {name}")
+                            if name in layer_dict:
+                                del layer_dict[name]
+                            if layer_id in id_to_name:
+                                del id_to_name[layer_id]
+
+                    known_layer_ids = current_layer_ids
+
+                # Handle name changes
+                elif "layer/general/name/get" in response_str:
+                    parts = response_str.split("+")
+                    layer_id = parts[0].split("id=")[-1]
+                    name_part = [p for p in parts if p.startswith("value=")]
+                    new_name = name_part[0].replace("value=", "") if name_part else "Unnamed"
+                    cleaned_name = clean_text(new_name)
+
+                    old_name = id_to_name.get(layer_id)
+
+                    if old_name != cleaned_name:
+                        print(f"✏️ Name changed for {layer_id}: '{old_name}' → '{cleaned_name}'")
+
+                        # Update dicts
+                        if old_name in layer_dict:
+                            del layer_dict[old_name]
+                        id_to_name[layer_id] = cleaned_name
+                        layer_dict[cleaned_name] = layer_id
+
+            except socket.timeout:
+                continue
+
+    finally:
+        client_socket.close()
+
+def get_layer_list():
+    """
+    Returns all layers' ID and cleaned-up name (removes file extensions and punctuation).
+    Subscribes to name updates for each layer.
+    """
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    client_socket.settimeout(2)
+
+    try:
+        auth_command = f"apikey?value={API_KEY}"
+        client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
+        time.sleep(1)
+
+        api_command = "layerList/get"
+        client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
+
+        layers = []
+        start_time = time.time()
+
+        while time.time() - start_time < 5:
+            try:
+                response, _ = client_socket.recvfrom(8192)
+                response_str = response.decode("utf-8", errors="ignore")
+
+                print("Raw Response:", response_str)
+
+                if "layerList/get" in response_str:
+                    parts = response_str.split("id=")[1:]
+                    for part in parts:
+                        layer_info = part.strip().split("+")
+                        layer_id = layer_info[0]
+                        name_value = [x.replace("name=", "") for x in layer_info if x.startswith("name=")]
+                        raw_name = name_value[0] if name_value else "Unnamed Layer"
+
+                        # Clean the name (remove extension and punctuation)
+                        name_without_ext = raw_name.split(".")[0]
+                        cleaned_name = name_without_ext.translate(str.maketrans('', '', string.punctuation)).lower().strip()
+
+                        layers.append((layer_id, cleaned_name))
+
+                        # 🔔 Subscribe to name updates
+                        name_subscribe_command = f"layer/general/name/subscribe?id={layer_id}"
+                        client_socket.sendto(name_subscribe_command.encode(), SERVER_ADDRESS)
+                        print(f"Subscribed to name updates for ID: {layer_id}")
+
+                    break  # Exit once we’ve handled the first valid response
+
+            except socket.timeout:
+                print("No response yet, retrying...")
+                client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
+
+        return layers
+
+    finally:
+        client_socket.close()
+
+
+def select_layer(layer_id):
+    """
+    Selects a layer.
+
+    layer_id: Layer id for layer to be selected
+    """
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    try:
+        auth_command = f"apikey?value={API_KEY}"
+        client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
+        time.sleep(1)  
+
+        api_command = f"layer/select?id={layer_id}"
+        client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
+        print(f"Sent command: {api_command}")
+
+    finally:
+        client_socket.close()
+
+def remove_layer(layer_id):
+    """
+    Removes a layer.
+
+    layer_id: Layer id for layer to be removed
+    """
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    try:
+        auth_command = f"apikey?value={API_KEY}"
+        client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
+        time.sleep(1)  
+
+        api_command = f"layer/remove?id={layer_id}"
+        client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
+        print(f"Sent command: {api_command}")
+
+    finally:
+        client_socket.close()
+
+def set_layer_pin(layer_id, pin):
+    """
+    Pins a layer.
+
+    layer_id: Layer id for layer to be pinned
+    """
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    try:
+        auth_command = f"apikey?value={API_KEY}"
+        client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
+        time.sleep(1)  
+
+        if pin:
+            api_command = f"layer/general/pin/set?id={layer_id}+value=1"
+        else:
+            api_command = f"layer/general/pin/set?id={layer_id}+value=0"
+
+        client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
+        print(f"Sent command: {api_command}")
+
+    finally:
+        client_socket.close()
+
+def set_layer_visibility(layer_id, enable):
+    """
+    Enables or disables a layer.
+
+    layer_id: Layer id for layer to be enabled/disabled
+    """
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    try:
+        auth_command = f"apikey?value={API_KEY}"
+        client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
+        time.sleep(1)  
+
+        if enable:
+            api_command = f"layer/general/enabled/set?id={layer_id}+value=1"
+        else:
+            api_command = f"layer/general/enabled/set?id={layer_id}+value=0"
+
+        client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
+        print(f"Sent command: {api_command}")
+
+    finally:
+        client_socket.close()
+
+def layer_position(layer_id, position_mode):
+    """
+    Changes the position mode for a layer.
+
+    layer_id: Layer id for layer to be moved
+    position_mode (int): 0 - Lock to Container, 1 - Lock to Region, 2 - Free
+    """
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    try:
+        auth_command = f"apikey?value={API_KEY}"
+        client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
+        time.sleep(1)  
+
+        api_command = f"layer/geometry/positionMode/set?id={layer_id}+value={position_mode}"
+        client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
+        print(f"Sent command: {api_command}")
+
+    finally:
+        client_socket.close()
+
+def set_layer_lock(layer_id, lock):
+    """
+    Locks or unlocks a layer
+
+    layer_id: Layer id for layer to be locked/unlocked
+    """
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    try:
+        auth_command = f"apikey?value={API_KEY}"
+        client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
+        time.sleep(1)  
+
+        if lock:
+            api_command = f"layer/general/alwaysOnTop/set?id={layer_id}+value=1"
+        else:
+            api_command = f"layer/general/alwaysOnTop/set?id={layer_id}+value=0"
+        client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
+        print(f"Sent command: {api_command}")
+
+    finally:
+        client_socket.close()
+
+def get_layer_scale(layer_id):
+    """
+    Retrieves the current scale of a layer.
+
+    layer_id: Layer id of the layer whose scale is to be retrieved.
+    Returns: The current scale as a float, or None if retrieval fails.
+    """
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    client_socket.settimeout(2)
+
+    try:
+        auth_command = f"apikey?value={API_KEY}"
+        client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
+        time.sleep(1)
+
+        api_command = f"layer/geometry/scale/get?id={layer_id}"
+        client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
+        print(f"Sent command: {api_command}")
+
+        start_time = time.time()
+
+        while time.time() - start_time < 5:  
+            try:
+                response, _ = client_socket.recvfrom(4096)
+                response_str = response.decode("utf-8", errors="ignore")
+                print(f"Raw Response: {response_str}")
+
+                if "value=" in response_str:
+                    scale_value = response_str.split("value=")[1].split("+")[0]  
+                    return float(scale_value)
+
+            except socket.timeout:
+                print("Waiting for scale value...") 
+
+        print("⚠️ Scale retrieval timed out.")
+        return None
+
+    finally:
+        client_socket.close()
+
+def set_layer_scale(layer_id, value, scale):
+    """
+    Adjusts the scale of a layer.
+
+    layer_id: Layer id for layer to be scaled.
+    value (int): Percentage change (e.g., 50 for +50% or -50 for -50%).
+    scale (bool): True -> Scale up, False -> Scale down.
+    """
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    try:
+        current_scale = get_layer_scale(layer_id)
+        if current_scale is None:
+            print("Failed to retrieve current scale.")
+            return
+
+        adjustment = (value / 100) * current_scale
+        new_scale = current_scale + adjustment if scale else current_scale - adjustment
+        new_scale = max(new_scale, 0.01)
+
+        auth_command = f"apikey?value={API_KEY}"
+        client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
+        time.sleep(1)
+
+        api_command = f"layer/geometry/scale/set?id={layer_id}+value={new_scale}"
+        client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
+
+    finally:
+        client_socket.close()
+
+
+def move_layer(layer_id, times, direction):
+    """
+    Moves a layer up or down, repeat for a specified number of times.
+
+    layer_id: Layer id for layer to be moved
+    times (int): How many times the layer should be moved
+    direction (string): Layer moving up or down
+    """
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    try:
+        auth_command = f"apikey?value={API_KEY}"
+        client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
+        time.sleep(1)  
+
+        if direction == "up":
+            api_command = f"layer/moveUp/?id={layer_id}"
+        else:
+            api_command = f"layer/moveDown/?id={layer_id}"
+
+        #client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
+        for _ in range(times):
+            client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
+            time.sleep(0.5)
+        print(f"Sent command: {api_command}")
+
+    finally:
+        client_socket.close()
+
+
+def add_layer(type):
+    """
+    Adds a new layer.
+
+    type (string): Layer type (IMAGE, VIDEO etc.)
+    """
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    try:
+        auth_command = f"apikey?value={API_KEY}"
+        client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
+        time.sleep(1)  
+
+        api_command = f"layer/add?args=Image+id=123123123+index=4+type={type}"
+        client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
+        print(f"Sent command: {api_command}")
+
+    finally:
+        client_socket.close()
+
+def save_session(name):
+    """
+    Saves current session.
+
+    layer_id: Layer id for layer to be locked
+    name (string): Name of session
+    """
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    try:
+        auth_command = f"apikey?value={API_KEY}"
+        client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
+        time.sleep(1)  
+
+        api_command = f"session/saveAs?name={name}"
+        client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
+        print(f"Sent command: {api_command}")
+
+    finally:
+        client_socket.close()
+
+def position_layer(layer_id,x,y):
+    """
+    Changes the position of a layer
+
+    layer_id: Layer id for layer to be moved
+    x (int)
+    y (int)
+    """
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    try:
+        auth_command = f"apikey?value={API_KEY}"
+        client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
+        time.sleep(1)  
+
+        api_command = f"layer/geometry/position/set?id={layer_id}+x={x}+y={y}"
+        client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
+        print(f"Sent command: {api_command}")
+
+    finally:
+        client_socket.close()
+
+def play_video(layer_id):
+    """
+    Play video
+
+    layer_id: Layer id for video layer
+    """
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    try:
+        auth_command = f"apikey?value={API_KEY}"
+        client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
+        time.sleep(1)  
+
+        api_command = f"layer/playback/play?id={layer_id}"
+        client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
+        print(f"Sent command: {api_command}")
+
+    finally:
+        client_socket.close()
+
+        
+def get_regions():
+    """
+    Retrieves and prints the list of available regions/layouts.
+    """
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    client_socket.settimeout(2)  
+
+    try:
+        auth_command = f"apikey?value={API_KEY}"
+        client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
+        time.sleep(1)  
+
+        layout_list_command = "app/layout/get?index=0"
+        client_socket.sendto(layout_list_command.encode(), SERVER_ADDRESS)
+        print(f"Sent command: {layout_list_command}")
+
+        start_time = time.time()
+        while time.time() - start_time < 5: 
+            try:
+                response, _ = client_socket.recvfrom(4096)  
+                response_str = response.decode("utf-8", errors="ignore")
+                print(f"Raw Response: {response_str}")
+
+                if "app/layout/get?index=0" in response_str:
+                    break 
+
+            except socket.timeout:
+                print("Still waiting for response...")
+                client_socket.sendto(layout_list_command.encode(), SERVER_ADDRESS) 
+
+    finally:
+        client_socket.close()
+
+def voice_command():
+    speech_string = speech_to_text()
+    parsed = parse_command(speech_string)
+    print(parsed)
+    
+    # if parsed["layer"]:
+    #     parsed["layer"] = get_layer_id(parsed["layer"])
+
+    #     if parsed["layer"] == "No such layer":
+    #         # display_layer_list()
+    #         print("Layer does not exist")
+    #         return  
+    if not parsed["layer"]:
+        print("No layer")
+
+    command_to_function(parsed)
+
+if __name__ == "__main__":
+    #voice_command()
+    #listen_for_wake_word()
+    #voice_command()
+    #listen_for_all_layer_changes()    
+    start_background_services()
