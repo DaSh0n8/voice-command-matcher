@@ -13,6 +13,7 @@ import string
 import threading
 import re
 from spacy.matcher import Matcher
+from rapidfuzz import fuzz, process
 
 # Load configuration from config.json
 def load_config():
@@ -24,11 +25,10 @@ config = load_config()
 IGLOO_SERVER_IP = config["IGLOO_SERVER_IP"]
 IGLOO_SERVER_PORT = config["IGLOO_SERVER_PORT"]
 API_KEY = config["API_KEY"]
+ACCESS_KEY = config["ACCESS_KEY"]
 SERVER_ADDRESS = (IGLOO_SERVER_IP, IGLOO_SERVER_PORT)
 
-# Access key for porcupine
-ACCESS_KEY = "Qvzec8n0OXf26c/lJCoyxdIEUEinZW64C0MercOCf2R1p5QY5+9qOQ=="
-
+# Path to wake word model
 WAKE_WORD_PATH = "Hey-Igloo_en_mac_v3_0_0/Hey-Igloo_en_mac_v3_0_0.ppn"  
 
 porcupine = pvporcupine.create(
@@ -67,9 +67,9 @@ def listen_for_wake_word():
         keyword_index = porcupine.process(pcm)
 
         if keyword_index >= 0:
-            print("🎤 Wake word detected!")
+            print("Wake word detected!")
             command_loop() 
-            print("🔕 Returning to sleep mode...")
+            print("Returning to sleep mode...")
 
 current_session_id = None
 current_session_name = None
@@ -149,7 +149,7 @@ action_patterns = [
     [{"LOWER": "remove"}], [{"LOWER": "delete"}], [{"LOWER": "start"}], [{"LOWER": "save"}], 
     [{"LOWER": "select"}], [{"LOWER": "pin"}], [{"LOWER": "unpin"}], [{"LOWER": "snap"}], 
     [{"LOWER": "lock"}], [{"LOWER": "enable"}], [{"LOWER": "disable"}], [{"LOWER": "zoom"}],
-    [{"LOWER": "play"}],
+    [{"LOWER": "play"}], [{"LOWER": "minimize"}], [{"LOWER": "shrink"}],
 ]
 matcher.add("ACTION", action_patterns)
 
@@ -169,6 +169,14 @@ def clean_text(text):
     """
     return re.sub(r"[^\w\s]", "", text.lower()).strip()
 
+def remove_file_extension(name):
+    common_exts = [".jpg", ".jpeg", ".png", ".mp4", ".mov", ".avi", ".mkv", ".pdf"]
+    name_lower = name.lower()
+    for ext in common_exts:
+        if name_lower.endswith(ext):
+            return name[: -len(ext)]
+    return name
+
 def find_best_layer_match(doc_text, layer_dict):
     """
     Uses a sliding window approach to find match starting from highest word count (window size) in dictionary,
@@ -184,12 +192,18 @@ def find_best_layer_match(doc_text, layer_dict):
 
     for window_size in range(max_n, 0, -1):
         for i in range(len(words) - window_size + 1):
-            candidate = " ".join(words[i : i + window_size]).strip()  
+            candidate = " ".join(words[i : i + window_size]).strip()
 
-            if candidate in layer_dict:  
-                return layer_dict[candidate]  
+            if candidate in layer_dict:
+                return layer_dict[candidate]
 
-    return None 
+            match, score, _ = process.extractOne(
+                candidate, layer_dict.keys(), scorer=fuzz.token_sort_ratio
+            )
+            if score >= 70:
+                return layer_dict[match]
+
+    return None
 
 def process_numeric_value(value):
     """
@@ -240,34 +254,44 @@ def get_layer_id(layer_name):
 def command_to_function(command):
     """
     Determines what function to call depending on the values of each command.
-
-    command (dict): A dict containing a command's action, layer and value
     """
-    if command["action"] == "save" and command["value"] == "session":
+    action = command.get("action")
+    layer = command.get("layer")
+    value = command.get("value")
+
+    if action == "save" and value == "session":
         print("saving as:" + current_session_name)
-        save_session(current_session_name)
-    elif command["action"] == "select" and command["layer"]:
-        select_layer(command["layer"])
-    elif (command["action"] == "remove" or command["action"] == "delete") and command["layer"]:
-        remove_layer(command["layer"])
-    elif command["action"] == "pin" and command["layer"]:
-        set_layer_pin(command["layer"], True)
-    elif command["action"] == "unpin" and command["layer"]:
-        set_layer_pin(command["layer"], False)
-    elif command["action"] == "lock" and command["layer"]:
-        set_layer_lock(command["layer"], True)
-    elif command["action"] == "unlock" and command["layer"]:
-        set_layer_lock(command["layer"], False)
-    elif (command["action"] == "enable" or command["action"] == "unhide") and command["layer"]:
-        set_layer_visibility(command["layer"], True)
-    elif (command["action"] == "disable" or command["action"] == "hide") and command["layer"]:
-        set_layer_visibility(command["layer"], False)
-    elif command["action"] == 'play' and command["layer"]:
-        play_video(command["layer"])
-    elif command["action"] == 'zoom' and command["layer"] and command["value"]:
-        set_layer_scale(command["layer"], command["value"], True)
-    else:
-        print("Don't understand command")
+        return save_session(current_session_name)
+
+    action_map = {
+        ("select", True): select_layer,
+        ("remove", True): remove_layer,
+        ("delete", True): remove_layer,
+        ("pin", True): lambda l: set_layer_pin(l, True),
+        ("unpin", True): lambda l: set_layer_pin(l, False),
+        ("lock", True): lambda l: set_layer_lock(l, True),
+        ("unlock", True): lambda l: set_layer_lock(l, False),
+        ("enable", True): lambda l: set_layer_visibility(l, True),
+        ("unhide", True): lambda l: set_layer_visibility(l, True),
+        ("disable", True): lambda l: set_layer_visibility(l, False),
+        ("hide", True): lambda l: set_layer_visibility(l, False),
+        ("play", True): play_video,
+    }
+
+    func = action_map.get((action, True))
+    if func and layer:
+        return func(layer)
+
+    if action == "zoom" and layer:
+        zoom_value = value if value else 25
+        return set_layer_scale(layer, zoom_value, True)
+
+    if action in ("shrink", "minimize") and layer:
+        shrink_value = value if value else 25
+        return set_layer_scale(layer, shrink_value, False)
+
+    print("Don't understand command")
+
 
 def get_session_list():
     """
@@ -386,7 +410,7 @@ def listen_for_all_layer_changes():
                         if raw_name == "Layer1":
                             raw_name = layer_type[0] + layer_type[1:].lower()
 
-                        cleaned_name = clean_text(raw_name)
+                        cleaned_name = clean_text(remove_file_extension(raw_name))
 
                         current_layer_ids.add(layer_id)
 
@@ -398,7 +422,6 @@ def listen_for_all_layer_changes():
                         id_to_name[layer_id] = cleaned_name
                         layer_dict[cleaned_name] = layer_id
 
-                        # Subscribe to name updates (if not already)
                         if layer_id not in subscribed_to_name_ids:
                             sub_cmd = f"layer/general/name/subscribe?id={layer_id}"
                             client_socket.sendto(sub_cmd.encode(), SERVER_ADDRESS)
@@ -859,25 +882,7 @@ def get_regions():
     finally:
         client_socket.close()
 
-def voice_command():
-    speech_string = speech_to_text()
-    parsed = parse_command(speech_string)
-    print(parsed)
-    
-    # if parsed["layer"]:
-    #     parsed["layer"] = get_layer_id(parsed["layer"])
-
-    #     if parsed["layer"] == "No such layer":
-    #         # display_layer_list()
-    #         print("Layer does not exist")
-    #         return  
-    if not parsed["layer"]:
-        print("No layer")
-
-    command_to_function(parsed)
-
 if __name__ == "__main__":
-    #voice_command()
     #listen_for_wake_word()
     #voice_command()
     #listen_for_all_layer_changes()    
