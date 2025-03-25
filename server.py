@@ -150,10 +150,21 @@ action_patterns = [
     [{"LOWER": "hide"}], [{"LOWER": "unhide"}], [{"LOWER": "move"}], [{"LOWER": "duplicate"}],
     [{"LOWER": "remove"}], [{"LOWER": "delete"}], [{"LOWER": "start"}], [{"LOWER": "save"}], 
     [{"LOWER": "select"}], [{"LOWER": "pin"}], [{"LOWER": "unpin"}], [{"LOWER": "snap"}], 
-    [{"LOWER": "lock"}], [{"LOWER": "enable"}], [{"LOWER": "disable"}], [{"LOWER": "zoom"}],
+    [{"LOWER": "lock"}], [{"LOWER": "enable"}], [{"LOWER": "disable"}],
     [{"LOWER": "play"}], [{"LOWER": "pause"}], [{"LOWER": "stop"}],
-    [{"LOWER": "minimize"}], [{"LOWER": "shrink"}],
     
+    # For Scale
+    [{"LOWER": "minimize"}], [{"LOWER": "shrink"}], [{"LOWER": "minimized"}],
+    [{"LOWER": "zoom"}], [{"LOWER": "enlarge"}],
+    [{"LOWER": "set"}, {"LOWER": "scale"}],
+    [{"LOWER": "increase"}, {"LOWER": "scale"}],
+    [{"LOWER": "decrease"}, {"LOWER": "scale"}],
+    [{"LOWER": "increase"}, {"LOWER": "the"}, {"LOWER": "scale"}],
+    [{"LOWER": "decrease"}, {"LOWER": "the"}, {"LOWER": "scale"}],
+    [{"LOWER": "lower"}, {"LOWER": "the"}, {"LOWER": "scale"}],
+    [{"LOWER": "set"}, {"LOWER": "the"}, {"LOWER": "scale"}],
+
+    # For volume
     [{"LOWER": "set"}, {"LOWER": "volume"}],
     [{"LOWER": "increase"}, {"LOWER": "volume"}],
     [{"LOWER": "decrease"}, {"LOWER": "volume"}],
@@ -166,15 +177,15 @@ action_patterns = [
 
 matcher.add("ACTION", action_patterns)
 
-# PARAMETER patterns
-parameter_patterns = [
+# Value patterns
+value_patterns = [
     [{"LOWER": "by"}, {"LIKE_NUM": True}, {"TEXT": {"REGEX": "%|px|pixels"}}], 
     [{"LIKE_NUM": True}, {"TEXT": {"REGEX": "%|px"}}],  
     [{"LOWER": "half"}, {"LOWER": "size"}], 
     [{"LOWER": "session"}],  
     [{"LOWER": "region"}, {"LIKE_NUM": True}], 
 ]
-matcher.add("PARAMETER", parameter_patterns)
+matcher.add("VALUE", value_patterns)
 
 def clean_text(text):
     """
@@ -247,7 +258,7 @@ def parse_command(command):
 
         if label == "ACTION":
             extracted["action"] = entity_text
-        elif label == "PARAMETER":
+        elif label == "VALUE":
             extracted["value"] = entity_text
     
     if extracted["value"]:
@@ -304,13 +315,37 @@ def command_to_function(command):
     }
 
     if layer == "all":
-
+        
         func = action_map.get((action, True))
         if func:
             print(f"Applying '{action}' to all layers...")
             for layer_id in layer_dict.values():
                 func(layer_id)
             return
+        
+        if action in ("set scale", "increase scale", "decrease scale", "lower scale", "set the scale", 
+                      "increase the scale", "decrease the scale", "lower the scale"):
+            for layer_id in layer_dict.values():
+                current_scale = get_layer_scale(layer_id)
+                if current_scale is None:
+                    print(f"Failed to get scale for layer {layer_id}. Skipping.")
+                    continue
+
+                if action == "set scale" and value is not None:
+                    new_scale = max(value / 100, 0.01)
+                else:
+                    adjustment = (value / 100) if value else 0.25
+                    if action in ("increase scale"):
+                        new_scale = current_scale + (adjustment * current_scale)
+                    elif action in ("decrease scale", "lower scale"):
+                        new_scale = current_scale - (adjustment * current_scale)
+                    else:
+                        continue
+                    new_scale = max(new_scale, 0.01)
+
+                set_layer_scale(layer_id, new_scale, True)  
+            return
+            
 
         if action in ("set volume", "increase volume", "decrease volume", "set the volume", "increase the volume", 
                       "decrease the volume", "lower volume", "lower the volume"):
@@ -350,8 +385,30 @@ def command_to_function(command):
     if action in ("shrink", "minimize") and layer:
         shrink_value = value if value else 25
         return set_layer_scale(layer, shrink_value, False)
+    
+    if action in ("set scale", "increase scale", "decrease scale", "lower scale", "set the scale", 
+              "increase the scale", "decrease the scale", "lower the scale") and layer:
+        current_scale = get_layer_scale(layer)
+        if current_scale is None:
+            print("Failed to get current scale.")
+            return
 
-    if action in ("set volume", "increase volume", "decrease volume") and layer:
+        if action in ("set scale", "set the scale") and value is not None:
+            new_scale = max(value / 100, 0.01)
+        else:
+            adjustment = (value / 100) if value else 0.25
+            if action in ("increase scale", "increase the scale"):
+                new_scale = current_scale + (adjustment * current_scale)
+            elif action in ("decrease scale", "lower scale", "decrease the scale", "lower the scale"):
+                new_scale = current_scale - (adjustment * current_scale)
+            else:
+                new_scale = current_scale
+            new_scale = max(new_scale, 0.01)
+
+        return set_layer_scale_absolute(layer, new_scale)
+
+    if action in ("set volume", "increase volume", "decrease volume", "set the volume", "increase the volume", 
+                      "decrease the volume", "lower volume", "lower the volume") and layer:
         if action == "set volume" and value is not None:
             new_volume = max(min(value / 100, 1.0), 0.0)
             return set_layer_volume(layer, new_volume)
@@ -736,6 +793,26 @@ def set_layer_scale(layer_id, value, scale):
         new_scale = current_scale + adjustment if scale else current_scale - adjustment
         new_scale = max(new_scale, 0.01)
 
+        auth_command = f"apikey?value={API_KEY}"
+        client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
+
+        api_command = f"layer/geometry/scale/set?id={layer_id}+value={new_scale}"
+        client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
+
+    finally:
+        client_socket.close()
+
+def set_layer_scale_absolute(layer_id, new_scale):
+    """
+    Directly sets the scale of a layer to an absolute value.
+
+    layer_id: Layer id for layer to be scaled.
+    new_scale (int): Scale for layer to be set to.
+    """
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    try:
+        new_scale = max(new_scale, 0.01)  
         auth_command = f"apikey?value={API_KEY}"
         client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
 
