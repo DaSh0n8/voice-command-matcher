@@ -29,7 +29,9 @@ ACCESS_KEY = config["ACCESS_KEY"]
 SERVER_ADDRESS = (IGLOO_SERVER_IP, IGLOO_SERVER_PORT)
 
 # Path to wake word model
-WAKE_WORD_PATH = "Hey-Igloo_en_mac_v3_0_0/Hey-Igloo_en_mac_v3_0_0.ppn"  
+WAKE_WORD_PATH = "Hey-Igloo_en_mac_v3_0_0/Hey-Igloo_en_mac_v3_0_0.ppn" 
+
+CURRENT_LAYER = None
 
 porcupine = pvporcupine.create(
     access_key=ACCESS_KEY,  
@@ -149,8 +151,19 @@ action_patterns = [
     [{"LOWER": "remove"}], [{"LOWER": "delete"}], [{"LOWER": "start"}], [{"LOWER": "save"}], 
     [{"LOWER": "select"}], [{"LOWER": "pin"}], [{"LOWER": "unpin"}], [{"LOWER": "snap"}], 
     [{"LOWER": "lock"}], [{"LOWER": "enable"}], [{"LOWER": "disable"}], [{"LOWER": "zoom"}],
-    [{"LOWER": "play"}], [{"LOWER": "minimize"}], [{"LOWER": "shrink"}],
+    [{"LOWER": "play"}], [{"LOWER": "pause"}], [{"LOWER": "stop"}],
+    [{"LOWER": "minimize"}], [{"LOWER": "shrink"}],
+    
+    [{"LOWER": "set"}, {"LOWER": "volume"}],
+    [{"LOWER": "increase"}, {"LOWER": "volume"}],
+    [{"LOWER": "decrease"}, {"LOWER": "volume"}],
+    [{"LOWER": "lower"}, {"LOWER": "volume"}],
+    [{"LOWER": "increase"}, {"LOWER": "the"}, {"LOWER": "volume"}],
+    [{"LOWER": "decrease"}, {"LOWER": "the"}, {"LOWER": "volume"}],
+    [{"LOWER": "lower"}, {"LOWER": "the"}, {"LOWER": "volume"}],
+    [{"LOWER": "set"}, {"LOWER": "the"}, {"LOWER": "volume"}]
 ]
+
 matcher.add("ACTION", action_patterns)
 
 # PARAMETER patterns
@@ -187,6 +200,9 @@ def find_best_layer_match(doc_text, layer_dict):
     doc_test (str): Command spoken by user
     layer_dict (dict): A dictionary containing layer_name as key, and layer_id as value
     """
+    if "all layers" in doc_text.lower() or "all videos" in doc_text.lower():
+        return "all"
+    
     words = clean_text(doc_text).split()
     max_n = max(len(layer.split()) for layer in layer_dict) if layer_dict else 1  
 
@@ -255,9 +271,16 @@ def command_to_function(command):
     """
     Determines what function to call depending on the values of each command.
     """
+    global CURRENT_LAYER
     action = command.get("action")
     layer = command.get("layer")
     value = command.get("value")
+
+    # If the user doesn't specify layer, use layer from previous command
+    print("layer : " , layer , "CURRENT_LAYER: " , CURRENT_LAYER)
+    if not layer and CURRENT_LAYER:
+        layer = CURRENT_LAYER
+        print(f"No layer specified — using CURRENT_LAYER: {layer}")
 
     if action == "save" and value == "session":
         print("saving as:" + current_session_name)
@@ -276,10 +299,48 @@ def command_to_function(command):
         ("disable", True): lambda l: set_layer_visibility(l, False),
         ("hide", True): lambda l: set_layer_visibility(l, False),
         ("play", True): play_video,
+        ("pause", True): pause_video,
+        ("stop", True): stop_video
     }
+
+    if layer == "all":
+
+        func = action_map.get((action, True))
+        if func:
+            print(f"Applying '{action}' to all layers...")
+            for layer_id in layer_dict.values():
+                func(layer_id)
+            return
+
+        if action in ("set volume", "increase volume", "decrease volume", "set the volume", "increase the volume", 
+                      "decrease the volume", "lower volume", "lower the volume"):
+            for layer_id in layer_dict.values():
+                if action == "set volume" and value is not None:
+                    new_volume = max(min(value / 100, 1.0), 0.0)
+                    set_layer_volume(layer_id, new_volume)
+                else:
+                    current_volume = get_layer_volume(layer_id)
+                    if current_volume is None:
+                        print(f"Failed to get volume for layer {layer_id}. Skipping.")
+                        continue
+
+                    adjustment = (value / 100) if value else 0.1
+
+                    if action == "increase volume":
+                        new_volume = min(current_volume + adjustment, 1.0)
+                    elif action == "decrease volume":
+                        new_volume = max(current_volume - adjustment, 0.0)
+                    else:
+                        continue
+
+                    set_layer_volume(layer_id, new_volume)
+
+            return
 
     func = action_map.get((action, True))
     if func and layer:
+        if layer != "all":
+            CURRENT_LAYER = layer
         return func(layer)
 
     if action == "zoom" and layer:
@@ -289,6 +350,27 @@ def command_to_function(command):
     if action in ("shrink", "minimize") and layer:
         shrink_value = value if value else 25
         return set_layer_scale(layer, shrink_value, False)
+
+    if action in ("set volume", "increase volume", "decrease volume") and layer:
+        if action == "set volume" and value is not None:
+            new_volume = max(min(value / 100, 1.0), 0.0)
+            return set_layer_volume(layer, new_volume)
+
+        current_volume = get_layer_volume(layer)
+        if current_volume is None:
+            print("Failed to get current volume.")
+            return
+
+        adjustment = (value / 100) if value else 0.1  
+
+        if action == "increase volume":
+            new_volume = min(current_volume + adjustment, 1.0)
+        elif action == "decrease volume":
+            new_volume = max(current_volume - adjustment, 0.0)
+        else:
+            new_volume = current_volume
+
+        return set_layer_volume(layer, new_volume)
 
     print("Don't understand command")
 
@@ -304,7 +386,6 @@ def get_session_list():
     try:
         auth_command = f"apikey?value={API_KEY}"
         client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
-        time.sleep(1)
 
         session_list_command = "sessionList/get"
         client_socket.sendto(session_list_command.encode(), SERVER_ADDRESS)
@@ -370,19 +451,15 @@ def listen_for_all_layer_changes():
     client_socket.settimeout(5)
 
     try:
-        # Authenticate
         client_socket.sendto(f"apikey?value={API_KEY}".encode(), SERVER_ADDRESS)
-        time.sleep(1)
 
-        # Subscribe to layer list updates
         client_socket.sendto("layerList/subscribe".encode(), SERVER_ADDRESS)
-        print("✅ Subscribed to layer list...")
+        print("Subscribed to layer list...")
 
-        # Request initial layer list
         client_socket.sendto("layerList/get".encode(), SERVER_ADDRESS)
 
         known_layer_ids = set()
-        id_to_name = {}  # {layer_id: cleaned_name}
+        id_to_name = {} 
         subscribed_to_name_ids = set()
 
         while True:
@@ -406,7 +483,7 @@ def listen_for_all_layer_changes():
                         raw_name = name_value[0] if name_value else "Unnamed Layer"
                         layer_type = type_value[0] if type_value else "Unknown"
 
-                        # If name is like "Layer1", use type instead
+                        # If name is defaulted to "Layer1", use type instead
                         if raw_name == "Layer1":
                             raw_name = layer_type[0] + layer_type[1:].lower()
 
@@ -475,63 +552,6 @@ def listen_for_all_layer_changes():
     finally:
         client_socket.close()
 
-def get_layer_list():
-    """
-    Returns all layers' ID and cleaned-up name (removes file extensions and punctuation).
-    Subscribes to name updates for each layer.
-    """
-    client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    client_socket.settimeout(2)
-
-    try:
-        auth_command = f"apikey?value={API_KEY}"
-        client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
-        time.sleep(1)
-
-        api_command = "layerList/get"
-        client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
-
-        layers = []
-        start_time = time.time()
-
-        while time.time() - start_time < 5:
-            try:
-                response, _ = client_socket.recvfrom(8192)
-                response_str = response.decode("utf-8", errors="ignore")
-
-                print("Raw Response:", response_str)
-
-                if "layerList/get" in response_str:
-                    parts = response_str.split("id=")[1:]
-                    for part in parts:
-                        layer_info = part.strip().split("+")
-                        layer_id = layer_info[0]
-                        name_value = [x.replace("name=", "") for x in layer_info if x.startswith("name=")]
-                        raw_name = name_value[0] if name_value else "Unnamed Layer"
-
-                        # Clean the name (remove extension and punctuation)
-                        name_without_ext = raw_name.split(".")[0]
-                        cleaned_name = name_without_ext.translate(str.maketrans('', '', string.punctuation)).lower().strip()
-
-                        layers.append((layer_id, cleaned_name))
-
-                        # 🔔 Subscribe to name updates
-                        name_subscribe_command = f"layer/general/name/subscribe?id={layer_id}"
-                        client_socket.sendto(name_subscribe_command.encode(), SERVER_ADDRESS)
-                        print(f"Subscribed to name updates for ID: {layer_id}")
-
-                    break  # Exit once we’ve handled the first valid response
-
-            except socket.timeout:
-                print("No response yet, retrying...")
-                client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
-
-        return layers
-
-    finally:
-        client_socket.close()
-
-
 def select_layer(layer_id):
     """
     Selects a layer.
@@ -543,7 +563,6 @@ def select_layer(layer_id):
     try:
         auth_command = f"apikey?value={API_KEY}"
         client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
-        time.sleep(1)  
 
         api_command = f"layer/select?id={layer_id}"
         client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
@@ -563,7 +582,6 @@ def remove_layer(layer_id):
     try:
         auth_command = f"apikey?value={API_KEY}"
         client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
-        time.sleep(1)  
 
         api_command = f"layer/remove?id={layer_id}"
         client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
@@ -583,7 +601,6 @@ def set_layer_pin(layer_id, pin):
     try:
         auth_command = f"apikey?value={API_KEY}"
         client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
-        time.sleep(1)  
 
         if pin:
             api_command = f"layer/general/pin/set?id={layer_id}+value=1"
@@ -607,7 +624,6 @@ def set_layer_visibility(layer_id, enable):
     try:
         auth_command = f"apikey?value={API_KEY}"
         client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
-        time.sleep(1)  
 
         if enable:
             api_command = f"layer/general/enabled/set?id={layer_id}+value=1"
@@ -632,7 +648,6 @@ def layer_position(layer_id, position_mode):
     try:
         auth_command = f"apikey?value={API_KEY}"
         client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
-        time.sleep(1)  
 
         api_command = f"layer/geometry/positionMode/set?id={layer_id}+value={position_mode}"
         client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
@@ -652,7 +667,6 @@ def set_layer_lock(layer_id, lock):
     try:
         auth_command = f"apikey?value={API_KEY}"
         client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
-        time.sleep(1)  
 
         if lock:
             api_command = f"layer/general/alwaysOnTop/set?id={layer_id}+value=1"
@@ -669,7 +683,6 @@ def get_layer_scale(layer_id):
     Retrieves the current scale of a layer.
 
     layer_id: Layer id of the layer whose scale is to be retrieved.
-    Returns: The current scale as a float, or None if retrieval fails.
     """
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     client_socket.settimeout(2)
@@ -677,7 +690,6 @@ def get_layer_scale(layer_id):
     try:
         auth_command = f"apikey?value={API_KEY}"
         client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
-        time.sleep(1)
 
         api_command = f"layer/geometry/scale/get?id={layer_id}"
         client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
@@ -698,7 +710,7 @@ def get_layer_scale(layer_id):
             except socket.timeout:
                 print("Waiting for scale value...") 
 
-        print("⚠️ Scale retrieval timed out.")
+        print("Scale retrieval timed out.")
         return None
 
     finally:
@@ -726,7 +738,6 @@ def set_layer_scale(layer_id, value, scale):
 
         auth_command = f"apikey?value={API_KEY}"
         client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
-        time.sleep(1)
 
         api_command = f"layer/geometry/scale/set?id={layer_id}+value={new_scale}"
         client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
@@ -734,6 +745,56 @@ def set_layer_scale(layer_id, value, scale):
     finally:
         client_socket.close()
 
+def get_layer_volume(layer_id):
+    """
+    Gets the current volume of a layer.
+    """
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    client_socket.settimeout(3)  
+
+    try:
+        auth_command = f"apikey?value={API_KEY}"
+        client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
+
+        get_command = f"layer/playback/volume/get?id={layer_id}"
+        client_socket.sendto(get_command.encode(), SERVER_ADDRESS)
+
+        start_time = time.time()
+
+        while time.time() - start_time < 5:
+            try:
+                response, _ = client_socket.recvfrom(8192)
+                response_str = response.decode("utf-8", errors="ignore")
+
+                if "layer/playback/volume/get" in response_str and "value=" in response_str:
+                    value_part = [part for part in response_str.split("+") if "value=" in part]
+                    if value_part:
+                        return float(value_part[0].replace("value=", ""))
+            except socket.timeout:
+                client_socket.sendto(get_command.encode(), SERVER_ADDRESS)
+
+    finally:
+        client_socket.close()
+
+    print("Failed to get volume within timeout.")
+    return None
+
+
+def set_layer_volume(layer_id, value):
+    """
+    Sets the volume of a layer to a given value (0-100).
+    """
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    try:
+        auth_command = f"apikey?value={API_KEY}"
+        client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
+
+        api_command = f"layer/playback/volume/set?id={layer_id}+value={value}"
+        client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
+
+    finally:
+        client_socket.close()
 
 def move_layer(layer_id, times, direction):
     """
@@ -748,7 +809,6 @@ def move_layer(layer_id, times, direction):
     try:
         auth_command = f"apikey?value={API_KEY}"
         client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
-        time.sleep(1)  
 
         if direction == "up":
             api_command = f"layer/moveUp/?id={layer_id}"
@@ -758,7 +818,6 @@ def move_layer(layer_id, times, direction):
         #client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
         for _ in range(times):
             client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
-            time.sleep(0.5)
         print(f"Sent command: {api_command}")
 
     finally:
@@ -776,7 +835,6 @@ def add_layer(type):
     try:
         auth_command = f"apikey?value={API_KEY}"
         client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
-        time.sleep(1)  
 
         api_command = f"layer/add?args=Image+id=123123123+index=4+type={type}"
         client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
@@ -797,7 +855,6 @@ def save_session(name):
     try:
         auth_command = f"apikey?value={API_KEY}"
         client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
-        time.sleep(1)  
 
         api_command = f"session/saveAs?name={name}"
         client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
@@ -819,7 +876,6 @@ def position_layer(layer_id,x,y):
     try:
         auth_command = f"apikey?value={API_KEY}"
         client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
-        time.sleep(1)  
 
         api_command = f"layer/geometry/position/set?id={layer_id}+x={x}+y={y}"
         client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
@@ -832,14 +888,13 @@ def play_video(layer_id):
     """
     Play video
 
-    layer_id: Layer id for video layer
+    layer_id: Layer id for video/ Youtube layer
     """
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
     try:
         auth_command = f"apikey?value={API_KEY}"
         client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
-        time.sleep(1)  
 
         api_command = f"layer/playback/play?id={layer_id}"
         client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
@@ -848,6 +903,43 @@ def play_video(layer_id):
     finally:
         client_socket.close()
 
+def pause_video(layer_id):
+    """
+    Pause video
+
+    layer_id: Layer id for video/ Youtube layer
+    """
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    try:
+        auth_command = f"apikey?value={API_KEY}"
+        client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
+
+        api_command = f"layer/playback/pause?id={layer_id}"
+        client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
+        print(f"Sent command: {api_command}")
+
+    finally:
+        client_socket.close()
+
+def stop_video(layer_id):
+    """
+    Stops video
+
+    layer_id: Layer id for video/ Youtube layer
+    """
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    try:
+        auth_command = f"apikey?value={API_KEY}"
+        client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
+
+        api_command = f"layer/playback/stop?id={layer_id}"
+        client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
+        print(f"Sent command: {api_command}")
+
+    finally:
+        client_socket.close()
         
 def get_regions():
     """
@@ -859,7 +951,6 @@ def get_regions():
     try:
         auth_command = f"apikey?value={API_KEY}"
         client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
-        time.sleep(1)  
 
         layout_list_command = "app/layout/get?index=0"
         client_socket.sendto(layout_list_command.encode(), SERVER_ADDRESS)
