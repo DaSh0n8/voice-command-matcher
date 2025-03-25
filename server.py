@@ -7,12 +7,12 @@ import speech_recognition as sr
 import sounddevice as sd
 import numpy as np
 import scipy.io.wavfile as wav
-import whisper
 import spacy
 import string
 import threading
 import re
 from spacy.matcher import Matcher
+from faster_whisper import WhisperModel
 from rapidfuzz import fuzz, process
 
 # Load configuration from config.json
@@ -78,7 +78,7 @@ current_session_name = None
 layer_dict = {}
 
 SAMPLE_RATE = 44100  
-DURATION = 4  
+DURATION = 4
 OUTPUT_FILE = "live_audio.wav"  
 
 def start_background_services():
@@ -111,9 +111,10 @@ def command_loop():
         if not parsed["layer"] and not parsed["action"]:
             print("Command not understood. Returning to sleep mode.")
             break
-
+        
         command_to_function(parsed)
         print("Command executed. Listening for more... (or go silent to exit)")
+        time.sleep(1)
 
 def record_audio():
     """
@@ -133,14 +134,18 @@ def speech_to_text():
     """   
     record_audio()
 
-    # Change to other models by doing load_model("tiny") 
-    model = whisper.load_model("base")
+    model = WhisperModel("small", compute_type="auto")
 
-    result = model.transcribe(OUTPUT_FILE, language="en")
-    
-    print("You said:", result["text"])
+    segments, info = model.transcribe(OUTPUT_FILE, language="en")
 
-    return result["text"].lower()
+    full_text = ""
+    for segment in segments:
+        full_text += segment.text + " "
+
+    full_text = full_text.strip()
+    print("You said:", full_text)
+
+    return full_text.lower()
 
 nlp = spacy.load("en_core_web_sm")
 matcher = Matcher(nlp.vocab)
@@ -150,8 +155,8 @@ action_patterns = [
     [{"LOWER": "hide"}], [{"LOWER": "unhide"}], [{"LOWER": "move"}], [{"LOWER": "duplicate"}],
     [{"LOWER": "remove"}], [{"LOWER": "delete"}], [{"LOWER": "start"}], [{"LOWER": "save"}], 
     [{"LOWER": "select"}], [{"LOWER": "pin"}], [{"LOWER": "unpin"}], [{"LOWER": "snap"}], 
-    [{"LOWER": "lock"}], [{"LOWER": "enable"}], [{"LOWER": "disable"}],
-    [{"LOWER": "play"}], [{"LOWER": "pause"}], [{"LOWER": "stop"}],
+    [{"LOWER": "lock"}], [{"LOWER": "enable"}], [{"LOWER": "disable"}], [{"LOWER": "add"}],
+    [{"LOWER": "play"}], [{"LOWER": "please"}], [{"LOWER": "pause"}], [{"LOWER": "stop"}],
     
     # For Scale
     [{"LOWER": "minimize"}], [{"LOWER": "shrink"}], [{"LOWER": "minimized"}],
@@ -310,6 +315,7 @@ def command_to_function(command):
         ("disable", True): lambda l: set_layer_visibility(l, False),
         ("hide", True): lambda l: set_layer_visibility(l, False),
         ("play", True): play_video,
+        ("please", True): play_video,
         ("pause", True): pause_video,
         ("stop", True): stop_video
     }
@@ -348,29 +354,34 @@ def command_to_function(command):
             
 
         if action in ("set volume", "increase volume", "decrease volume", "set the volume", "increase the volume", 
-                      "decrease the volume", "lower volume", "lower the volume"):
+              "decrease the volume", "lower volume", "lower the volume"):
+
+            action_base = action.replace("the ", "").strip()
+
             for layer_id in layer_dict.values():
-                if action == "set volume" and value is not None:
+                if "set volume" in action_base and value is not None:
                     new_volume = max(min(value / 100, 1.0), 0.0)
                     set_layer_volume(layer_id, new_volume)
+                    continue
+
+                current_volume = get_layer_volume(layer_id)
+                if current_volume is None:
+                    print(f"Failed to get volume for layer {layer_id}. Skipping.")
+                    continue
+
+                adjustment = (value / 100) * current_volume if value else 0.1 * current_volume
+                print("ADJUSTMENT: ", adjustment)
+
+                if "increase volume" in action_base:
+                    new_volume = min(current_volume + adjustment, 1.0)
+                    print(new_volume)
+                elif "decrease volume" in action_base or "lower volume" in action_base:
+                    new_volume = max(current_volume - adjustment, 0.0)
                 else:
-                    current_volume = get_layer_volume(layer_id)
-                    if current_volume is None:
-                        print(f"Failed to get volume for layer {layer_id}. Skipping.")
-                        continue
+                    continue
 
-                    adjustment = (value / 100) if value else 0.1
+                set_layer_volume(layer_id, new_volume)
 
-                    if action == "increase volume":
-                        new_volume = min(current_volume + adjustment, 1.0)
-                    elif action == "decrease volume":
-                        new_volume = max(current_volume - adjustment, 0.0)
-                    else:
-                        continue
-
-                    set_layer_volume(layer_id, new_volume)
-
-            return
 
     func = action_map.get((action, True))
     if func and layer:
@@ -407,27 +418,53 @@ def command_to_function(command):
 
         return set_layer_scale_absolute(layer, new_scale)
 
-    if action in ("set volume", "increase volume", "decrease volume", "set the volume", "increase the volume", 
-                      "decrease the volume", "lower volume", "lower the volume") and layer:
-        if action == "set volume" and value is not None:
-            new_volume = max(min(value / 100, 1.0), 0.0)
-            return set_layer_volume(layer, new_volume)
+    if action in ( "set volume", "increase volume", "decrease volume",
+    "set the volume", "increase the volume", "decrease the volume",
+    "lower volume", "lower the volume"
+    ) and layer:
+        action_base = action.replace("the ", "").strip()
 
-        current_volume = get_layer_volume(layer)
-        if current_volume is None:
-            print("Failed to get current volume.")
+        # Handle "all" layers
+        target_layers = (
+            list(layer_dict.values()) if layer == "all"
+            else [layer] if layer
+            else [CURRENT_LAYER] if CURRENT_LAYER
+            else []
+        )
+
+        if not target_layers:
+            print("No valid layer(s) specified.")
             return
 
-        adjustment = (value / 100) if value else 0.1  
+        for layer_id in target_layers:
+            if "set volume" in action_base:
+                if value is None:
+                    print(f"No volume value provided for layer {layer_id}.")
+                    continue
+                new_volume = max(min(value / 100, 1.0), 0.0)
+                print(f"Setting volume to {new_volume} for layer {layer_id}")
+                set_layer_volume(layer_id, new_volume)
+                continue
 
-        if action == "increase volume":
-            new_volume = min(current_volume + adjustment, 1.0)
-        elif action == "decrease volume":
-            new_volume = max(current_volume - adjustment, 0.0)
-        else:
-            new_volume = current_volume
+            # Relative increase/decrease
+            current_volume = get_layer_volume(layer_id)
+            if current_volume is None:
+                print(f"Failed to get volume for layer {layer_id}. Skipping.")
+                continue
 
-        return set_layer_volume(layer, new_volume)
+            adjustment = (value / 100) * current_volume if value else 0.1 * current_volume
+
+            if "increase volume" in action_base:
+                new_volume = min(current_volume + adjustment, 1.0)
+            elif "decrease volume" in action_base or "lower volume" in action_base:
+                new_volume = max(current_volume - adjustment, 0.0)
+            else:
+                continue
+
+            print(f"Setting volume to {new_volume} for layer {layer_id}")
+            set_layer_volume(layer_id, new_volume)
+
+        return
 
     print("Don't understand command")
 
@@ -827,7 +864,7 @@ def get_layer_volume(layer_id):
     Gets the current volume of a layer.
     """
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    client_socket.settimeout(3)  
+    client_socket.settimeout(5)  
 
     try:
         auth_command = f"apikey?value={API_KEY}"
