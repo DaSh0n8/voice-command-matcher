@@ -83,6 +83,9 @@ DURATION = 4
 OUTPUT_FILE = "live_audio.wav"  
 
 def start_background_services():
+    """
+    Start 2 background threads - listener for layer changes and wake word detector.
+    """
     layer_thread = threading.Thread(target=listen_for_all_layer_changes, daemon=True)
     
     wake_thread = threading.Thread(target=listen_for_wake_word, daemon=True)
@@ -119,8 +122,8 @@ def command_loop():
 
 def record_audio():
     """
-    Records user speech and turns it into a .wav file
-    Uses default microphone, and records for a set duration
+    Records user speech and turns it into a .wav file.
+    Uses default microphone, and records for a set duration.
     """   
     print("Say something:")
     
@@ -131,10 +134,11 @@ def record_audio():
 
 def speech_to_text(): 
     """
-    Converts speech to text using specified model
+    Converts speech to text using specified model.
     """   
     record_audio()
 
+    # Change model size here (tiny, base, small, medium, large, turbo)
     model = WhisperModel("small", compute_type="auto")
 
     segments, info = model.transcribe(OUTPUT_FILE, language="en")
@@ -181,7 +185,6 @@ action_patterns = [
     [{"LOWER": "lower"}, {"LOWER": "the"}, {"LOWER": "volume"}],
     [{"LOWER": "set"}, {"LOWER": "the"}, {"LOWER": "volume"}]
 ]
-
 matcher.add("ACTION", action_patterns)
 
 # Value patterns
@@ -210,6 +213,9 @@ def clean_text(text):
     return re.sub(r"[^\w\s]", "", text.lower()).strip()
 
 def remove_file_extension(name):
+    """
+    Removes common file extensions.
+    """
     common_exts = [".jpg", ".jpeg", ".png", ".mp4", ".mov", ".avi", ".mkv", ".pdf"]
     name_lower = name.lower()
     for ext in common_exts:
@@ -221,11 +227,11 @@ def find_best_layer_match(doc_text, layer_dict):
     """
     Uses a sliding window approach to find match starting from highest word count (window size) in dictionary,
     because if we have both 'Deloitte Tech Summary' and 'Tech Summary' in the dictionary, and we're looking 
-    for 'Deloitte Tech Summary', 'Tech Summary' will be found first as a match if we start from 
-    lowest word count to highest.
+    for 'Deloitte Tech Summary', 'Tech Summary' might be found first if the search window size is from lowest
+    to highest word count.
 
-    doc_test (str): Command spoken by user
-    layer_dict (dict): A dictionary containing layer_name as key, and layer_id as value
+    doc_test (str): Command spoken by user.
+    layer_dict (dict): A dictionary containing layer_name as key, and layer_id as value.
     """
     if "all layers" in doc_text.lower() or "all videos" in doc_text.lower():
         return "all"
@@ -252,7 +258,7 @@ def process_numeric_value(value):
     """
     Converts extracted values like "50%" or "20px" into integers.
 
-    value (str): Raw extracted value 
+    value (str): Raw extracted value.
     """
     match = re.match(r"(\d+)", value) 
     return int(match.group(1)) if match else None
@@ -261,7 +267,7 @@ def parse_command(command):
     """
     Extracts the action, layer, and value from a speech command.
 
-    command (str): Command spoken by user
+    command (str): User's command transcribed by Whisper.
     """
     doc = nlp(command)
     matches = matcher(doc)
@@ -290,15 +296,17 @@ def parse_command(command):
 
 def get_layer_id(layer_name):
     """
-    Retrieves a layer's id 
+    Retrieves the layer's id.
 
-    layer_name (string): Name of a layer, parsed from user speech
+    layer_name (string): Name of a layer, parsed from user speech.
     """
     return layer_dict.get(layer_name, "No such layer.")
 
 def command_to_function(command):
     """
     Determines what function to call depending on the values of each command.
+
+    command (dict): Command in the form of dict, storing action, layer, value and type.
     """
     global CURRENT_LAYER
     action = command.get("action")
@@ -667,7 +675,7 @@ def select_layer(layer_id):
     """
     Selects a layer.
 
-    layer_id: Layer id for layer to be selected
+    layer_id: Layer id for layer to be selected.
     """
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
@@ -686,7 +694,7 @@ def remove_layer(layer_id):
     """
     Removes a layer.
 
-    layer_id: Layer id for layer to be removed
+    layer_id: Layer id for layer to be removed.
     """
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
@@ -705,7 +713,7 @@ def set_layer_pin(layer_id, pin):
     """
     Pins a layer.
 
-    layer_id: Layer id for layer to be pinned
+    layer_id: Layer id for layer to be pinned.
     """
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
@@ -728,7 +736,8 @@ def set_layer_visibility(layer_id, enable):
     """
     Enables or disables a layer.
 
-    layer_id: Layer id for layer to be enabled/disabled
+    layer_id: Layer id for layer to be enabled/disabled.
+    enable (bool): True -> enable/unhide, False -> disable/hide.
     """
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
@@ -751,8 +760,8 @@ def layer_position(layer_id, position_mode):
     """
     Changes the position mode for a layer.
 
-    layer_id: Layer id for layer to be moved
-    position_mode (int): 0 - Lock to Container, 1 - Lock to Region, 2 - Free
+    layer_id: Layer id for layer to be moved.
+    position_mode (int): 0 - Lock to Container, 1 - Lock to Region, 2 - Free.
     """
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
@@ -769,9 +778,9 @@ def layer_position(layer_id, position_mode):
 
 def set_layer_lock(layer_id, lock):
     """
-    Locks or unlocks a layer
+    Locks or unlocks a layer.
 
-    layer_id: Layer id for layer to be locked/unlocked
+    layer_id: Layer id for layer to be locked/unlocked.
     """
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
@@ -919,6 +928,9 @@ def get_layer_volume(layer_id):
 def set_layer_volume(layer_id, value):
     """
     Sets the volume of a layer to a given value (0-100).
+
+    layer_id = layer_id for video layer.
+    value = the adjustment value, not the final value.
     """
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
@@ -936,9 +948,9 @@ def move_layer(layer_id, times, direction):
     """
     Moves a layer up or down, repeat for a specified number of times.
 
-    layer_id: Layer id for layer to be moved
-    times (int): How many times the layer should be moved
-    direction (string): Layer moving up or down
+    layer_id: Layer id for layer to be moved.
+    times (int): How many times the layer should be moved.
+    direction (string): Layer moving up or down.
     """
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
@@ -982,8 +994,8 @@ def save_session(name):
     """
     Saves current session.
 
-    layer_id: Layer id for layer to be locked
-    name (string): Name of session
+    layer_id: Layer id for layer to be locked.
+    name (string): Name of session.
     """
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
@@ -1021,9 +1033,9 @@ def position_layer(layer_id,x,y):
 
 def play_video(layer_id):
     """
-    Play video
+    Plays video.
 
-    layer_id: Layer id for video/ Youtube layer
+    layer_id: Layer id for video/ Youtube layer.
     """
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
@@ -1040,9 +1052,9 @@ def play_video(layer_id):
 
 def pause_video(layer_id):
     """
-    Pause video
+    Pauses video.
 
-    layer_id: Layer id for video/ Youtube layer
+    layer_id: Layer id for video/ Youtube layer.
     """
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
@@ -1059,9 +1071,9 @@ def pause_video(layer_id):
 
 def stop_video(layer_id):
     """
-    Stops video
+    Pauses video and resets duration to 0.
 
-    layer_id: Layer id for video/ Youtube layer
+    layer_id: Layer id for video/ Youtube layer.
     """
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
