@@ -32,6 +32,7 @@ SERVER_ADDRESS = (IGLOO_SERVER_IP, IGLOO_SERVER_PORT)
 WAKE_WORD_PATH = "Hey-Igloo_en_mac_v3_0_0/Hey-Igloo_en_mac_v3_0_0.ppn" 
 
 CURRENT_LAYER = None
+LAST_FN = None
 
 porcupine = pvporcupine.create(
     access_key=ACCESS_KEY,  
@@ -157,6 +158,7 @@ action_patterns = [
     [{"LOWER": "select"}], [{"LOWER": "pin"}], [{"LOWER": "unpin"}], [{"LOWER": "snap"}], 
     [{"LOWER": "lock"}], [{"LOWER": "enable"}], [{"LOWER": "disable"}], [{"LOWER": "add"}],
     [{"LOWER": "play"}], [{"LOWER": "please"}], [{"LOWER": "pause"}], [{"LOWER": "stop"}],
+    [{"LOWER": "add"}], [{"LOWER": "create"}],
     
     # For Scale
     [{"LOWER": "minimize"}], [{"LOWER": "shrink"}], [{"LOWER": "minimized"}],
@@ -191,6 +193,15 @@ value_patterns = [
     [{"LOWER": "region"}, {"LIKE_NUM": True}], 
 ]
 matcher.add("VALUE", value_patterns)
+
+# Type patterns for adding layers
+type_patterns = [
+    [{"LOWER": "image"}], [{"LOWER": "video"}], [{"LOWER": "pdf"}],
+    [{"LOWER": "webview"}], [{"LOWER": "youtube"}], [{"LOWER": "ndi"}],
+    [{"LOWER": "spout"}], [{"LOWER": "datapath"}], [{"LOWER": "contentbank"}],
+    [{"LOWER": "loopback"}], [{"LOWER": "appview"}],
+]
+matcher.add("TYPE", type_patterns)
 
 def clean_text(text):
     """
@@ -255,7 +266,7 @@ def parse_command(command):
     doc = nlp(command)
     matches = matcher(doc)
 
-    extracted = {"action": None, "layer": None, "value": None}
+    extracted = {"action": None, "layer": None, "value": None, "type": None}
 
     for match_id, start, end in matches:
         label = nlp.vocab.strings[match_id]  
@@ -265,6 +276,8 @@ def parse_command(command):
             extracted["action"] = entity_text
         elif label == "VALUE":
             extracted["value"] = entity_text
+        elif label == "TYPE":
+            extracted["type"] = entity_text
     
     if extracted["value"]:
         extracted["value"] = process_numeric_value(extracted["value"])
@@ -302,6 +315,16 @@ def command_to_function(command):
         print("saving as:" + current_session_name)
         return save_session(current_session_name)
 
+    if action in ("add", "create"):
+        layer_type = command.get("type")
+
+        if layer_type:
+            print(f"Adding new layer of type: {layer_type}")
+            return add_layer(layer_type)
+        else:
+            print("No layer type specified for add/create command.")
+            return
+    
     action_map = {
         ("select", True): select_layer,
         ("remove", True): remove_layer,
@@ -321,7 +344,6 @@ def command_to_function(command):
     }
 
     if layer == "all":
-        
         func = action_map.get((action, True))
         if func:
             print(f"Applying '{action}' to all layers...")
@@ -331,27 +353,31 @@ def command_to_function(command):
         
         if action in ("set scale", "increase scale", "decrease scale", "lower scale", "set the scale", 
                       "increase the scale", "decrease the scale", "lower the scale"):
+            action_base = action.replace("the ", "").strip()
+
             for layer_id in layer_dict.values():
                 current_scale = get_layer_scale(layer_id)
                 if current_scale is None:
                     print(f"Failed to get scale for layer {layer_id}. Skipping.")
                     continue
 
-                if action == "set scale" and value is not None:
+                if "set scale" in action_base and value is not None:
                     new_scale = max(value / 100, 0.01)
                 else:
-                    adjustment = (value / 100) if value else 0.25
-                    if action in ("increase scale"):
-                        new_scale = current_scale + (adjustment * current_scale)
-                    elif action in ("decrease scale", "lower scale"):
-                        new_scale = current_scale - (adjustment * current_scale)
+                    adjustment = (value / 100) * current_scale if value else 0.25 * current_scale
+
+                    if "increase scale" in action_base:
+                        new_scale = current_scale + adjustment
+                    elif "decrease scale" in action_base or "lower scale" in action_base:
+                        new_scale = current_scale - adjustment
                     else:
                         continue
+
                     new_scale = max(new_scale, 0.01)
 
-                set_layer_scale(layer_id, new_scale, True)  
+                set_layer_scale_absolute(layer_id, new_scale)
+
             return
-            
 
         if action in ("set volume", "increase volume", "decrease volume", "set the volume", "increase the volume", 
               "decrease the volume", "lower volume", "lower the volume"):
@@ -370,7 +396,6 @@ def command_to_function(command):
                     continue
 
                 adjustment = (value / 100) * current_volume if value else 0.1 * current_volume
-                print("ADJUSTMENT: ", adjustment)
 
                 if "increase volume" in action_base:
                     new_volume = min(current_volume + adjustment, 1.0)
@@ -382,6 +407,7 @@ def command_to_function(command):
 
                 set_layer_volume(layer_id, new_volume)
 
+            return
 
     func = action_map.get((action, True))
     if func and layer:
@@ -397,74 +423,65 @@ def command_to_function(command):
         shrink_value = value if value else 25
         return set_layer_scale(layer, shrink_value, False)
     
-    if action in ("set scale", "increase scale", "decrease scale", "lower scale", "set the scale", 
-              "increase the scale", "decrease the scale", "lower the scale") and layer:
+    if action in ("set scale", "increase scale", "decrease scale", "lower scale",
+        "set the scale", "increase the scale", "decrease the scale", "lower the scale") and layer:
+        action_base = action.replace("the ", "").strip()
+
         current_scale = get_layer_scale(layer)
         if current_scale is None:
             print("Failed to get current scale.")
             return
 
-        if action in ("set scale", "set the scale") and value is not None:
+        if "set scale" in action_base and value is not None:
             new_scale = max(value / 100, 0.01)
         else:
-            adjustment = (value / 100) if value else 0.25
-            if action in ("increase scale", "increase the scale"):
-                new_scale = current_scale + (adjustment * current_scale)
-            elif action in ("decrease scale", "lower scale", "decrease the scale", "lower the scale"):
-                new_scale = current_scale - (adjustment * current_scale)
+            adjustment = (value / 100) * current_scale if value else 0.25 * current_scale
+
+            if "increase scale" in action_base:
+                new_scale = current_scale + adjustment
+            elif "decrease scale" in action_base or "lower scale" in action_base:
+                new_scale = current_scale - adjustment
             else:
                 new_scale = current_scale
+
             new_scale = max(new_scale, 0.01)
+
+        if layer and layer != "all":
+            CURRENT_LAYER = layer
 
         return set_layer_scale_absolute(layer, new_scale)
 
-    if action in ( "set volume", "increase volume", "decrease volume",
-    "set the volume", "increase the volume", "decrease the volume",
-    "lower volume", "lower the volume"
-    ) and layer:
+    if action in ( "set volume", "increase volume", "decrease volume", "set the volume", 
+                  "increase the volume", "decrease the volume","lower volume", "lower the volume") and layer:
+        print("ENTERED")
         action_base = action.replace("the ", "").strip()
 
-        # Handle "all" layers
-        target_layers = (
-            list(layer_dict.values()) if layer == "all"
-            else [layer] if layer
-            else [CURRENT_LAYER] if CURRENT_LAYER
-            else []
-        )
+        if "set volume" in action_base:
+            if value is None:
+                print(f"No volume value provided for layer {layer}.")
+                return
+            new_volume = max(min(value / 100, 1.0), 0.0)
+            print(f"Setting volume to {new_volume} for layer {layer}")
+            return set_layer_volume(layer, new_volume)
 
-        if not target_layers:
-            print("No valid layer(s) specified.")
+        current_volume = get_layer_volume(layer)
+        if current_volume is None:
+            print(f"Failed to get volume for layer {layer}.")
             return
 
-        for layer_id in target_layers:
-            if "set volume" in action_base:
-                if value is None:
-                    print(f"No volume value provided for layer {layer_id}.")
-                    continue
-                new_volume = max(min(value / 100, 1.0), 0.0)
-                print(f"Setting volume to {new_volume} for layer {layer_id}")
-                set_layer_volume(layer_id, new_volume)
-                continue
+        adjustment = (value / 100) * current_volume if value else 0.1 * current_volume
 
-            # Relative increase/decrease
-            current_volume = get_layer_volume(layer_id)
-            if current_volume is None:
-                print(f"Failed to get volume for layer {layer_id}. Skipping.")
-                continue
+        if "increase volume" in action_base:
+            new_volume = min(current_volume + adjustment, 1.0)
+        elif "decrease volume" in action_base or "lower volume" in action_base:
+            new_volume = max(current_volume - adjustment, 0.0)
+        else:
+            return
+        
+        if layer and layer != "all":
+            CURRENT_LAYER = layer
 
-            adjustment = (value / 100) * current_volume if value else 0.1 * current_volume
-
-            if "increase volume" in action_base:
-                new_volume = min(current_volume + adjustment, 1.0)
-            elif "decrease volume" in action_base or "lower volume" in action_base:
-                new_volume = max(current_volume - adjustment, 0.0)
-            else:
-                continue
-
-            print(f"Setting volume to {new_volume} for layer {layer_id}")
-            set_layer_volume(layer_id, new_volume)
-
-        return
+        return set_layer_volume(layer, new_volume)
 
     print("Don't understand command")
 
@@ -779,7 +796,7 @@ def get_layer_scale(layer_id):
     layer_id: Layer id of the layer whose scale is to be retrieved.
     """
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    client_socket.settimeout(2)
+    client_socket.settimeout(1)
 
     try:
         auth_command = f"apikey?value={API_KEY}"
@@ -793,16 +810,21 @@ def get_layer_scale(layer_id):
 
         while time.time() - start_time < 5:  
             try:
-                response, _ = client_socket.recvfrom(4096)
+                response, _ = client_socket.recvfrom(8192)
                 response_str = response.decode("utf-8", errors="ignore")
-                print(f"Raw Response: {response_str}")
-
-                if "value=" in response_str:
-                    scale_value = response_str.split("value=")[1].split("+")[0]  
-                    return float(scale_value)
-
+                if "layer/geometry/scale/get" in response_str and "value=" in response_str:
+                    lines = response_str.splitlines()
+                    for line in lines:
+                        if "layer/geometry/scale/get" in line and "value=" in line:
+                            value_part = [part for part in line.split("+") if "value=" in part]
+                            if value_part:
+                                try:
+                                    return float(value_part[0].replace("value=", ""))
+                                except ValueError:
+                                    print("Failed to convert scale value to float:", value_part[0])
+                                    return None
             except socket.timeout:
-                print("Waiting for scale value...") 
+                continue
 
         print("Scale retrieval timed out.")
         return None
@@ -864,18 +886,18 @@ def get_layer_volume(layer_id):
     Gets the current volume of a layer.
     """
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    client_socket.settimeout(5)  
+    client_socket.settimeout(1) 
 
     try:
         auth_command = f"apikey?value={API_KEY}"
         client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
 
         get_command = f"layer/playback/volume/get?id={layer_id}"
-        client_socket.sendto(get_command.encode(), SERVER_ADDRESS)
-
         start_time = time.time()
 
         while time.time() - start_time < 5:
+            client_socket.sendto(get_command.encode(), SERVER_ADDRESS)
+
             try:
                 response, _ = client_socket.recvfrom(8192)
                 response_str = response.decode("utf-8", errors="ignore")
@@ -885,7 +907,7 @@ def get_layer_volume(layer_id):
                     if value_part:
                         return float(value_part[0].replace("value=", ""))
             except socket.timeout:
-                client_socket.sendto(get_command.encode(), SERVER_ADDRESS)
+                continue 
 
     finally:
         client_socket.close()
@@ -929,7 +951,6 @@ def move_layer(layer_id, times, direction):
         else:
             api_command = f"layer/moveDown/?id={layer_id}"
 
-        #client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
         for _ in range(times):
             client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
         print(f"Sent command: {api_command}")
