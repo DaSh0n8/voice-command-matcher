@@ -189,11 +189,18 @@ matcher.add("ACTION", action_patterns)
 
 # Value patterns
 value_patterns = [
-    [{"LOWER": "by"}, {"LIKE_NUM": True}, {"TEXT": {"REGEX": "%|px|pixels"}}], 
-    [{"LIKE_NUM": True}, {"TEXT": {"REGEX": "%|px"}}],  
-    [{"LOWER": "half"}, {"LOWER": "size"}], 
-    [{"LOWER": "session"}],  
-    [{"LOWER": "region"}, {"LIKE_NUM": True}], 
+    [{"LOWER": "by"}, {"TEXT": {"REGEX": r"^\d*\.?\d+$"}}, {"TEXT": {"REGEX": "%|px|pixels"}}],
+    
+    [{"TEXT": {"REGEX": r"^\d*\.?\d+$"}}, {"TEXT": {"REGEX": "%|px|pixels"}}],
+    
+    [{"LOWER": "by"}, {"TEXT": {"REGEX": r"^\d*\.?\d+$"}}],
+    [{"LOWER": "to"}, {"TEXT": {"REGEX": r"^\d*\.?\d+$"}}],
+
+    [{"TEXT": {"REGEX": r"^\d*\.?\d+$"}}],  
+    
+    [{"LOWER": "half"}, {"LOWER": "size"}],
+    [{"LOWER": "session"}],
+    [{"LOWER": "region"}, {"LIKE_NUM": True}],
 ]
 matcher.add("VALUE", value_patterns)
 
@@ -256,12 +263,28 @@ def find_best_layer_match(doc_text, layer_dict):
 
 def process_numeric_value(value):
     """
-    Converts extracted values like "50%" or "20px" into integers.
+    Cleans and parses numerical values including decimals and units like %, px, etc.
 
     value (str): Raw extracted value.
     """
-    match = re.match(r"(\d+)", value) 
-    return int(match.group(1)) if match else None
+    value = value.strip().replace("%", "").replace("px", "").replace("pixels", "")
+    
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def normalize_percentage(value):
+    """
+    Converts a value to 0–1 scale.
+
+    value (str): Raw extracted value.
+    """
+    if value is None:
+        return None
+    return value if 0 < value <= 1 else value / 100
+
 
 def parse_command(command):
     """
@@ -370,9 +393,15 @@ def command_to_function(command):
                     continue
 
                 if "set scale" in action_base and value is not None:
-                    new_scale = max(value / 100, 0.01)
+                    new_scale = max(min(normalize_percentage(value), 1.0), 0.0)
                 else:
-                    adjustment = (value / 100) * current_scale if value else 0.25 * current_scale
+                    if value is None:
+                        adjustment = 0.1 * current_scale
+                    elif 0 < value <= 1:
+                        adjustment = value * current_scale
+                    else:
+                        adjustment = (value / 100) * current_scale
+
 
                     if "increase scale" in action_base:
                         new_scale = current_scale + adjustment
@@ -394,7 +423,9 @@ def command_to_function(command):
 
             for layer_id in layer_dict.values():
                 if "set volume" in action_base and value is not None:
-                    new_volume = max(min(value / 100, 1.0), 0.0)
+                    #new_volume = max(min(value / 100, 1.0), 0.0)
+                    new_volume = max(min(normalize_percentage(value), 1.0), 0.0)
+
                     set_layer_volume(layer_id, new_volume)
                     continue
 
@@ -403,7 +434,13 @@ def command_to_function(command):
                     print(f"Failed to get volume for layer {layer_id}. Skipping.")
                     continue
 
-                adjustment = (value / 100) * current_volume if value else 0.1 * current_volume
+                if value is None:
+                    adjustment = 0.1 * current_volume
+                elif 0 < value <= 1:
+                    adjustment = value * current_volume
+                else:
+                    adjustment = (value / 100) * current_volume
+
 
                 if "increase volume" in action_base:
                     new_volume = min(current_volume + adjustment, 1.0)
@@ -435,15 +472,23 @@ def command_to_function(command):
         "set the scale", "increase the scale", "decrease the scale", "lower the scale") and layer:
         action_base = action.replace("the ", "").strip()
 
+        if layer and layer != "all":
+            CURRENT_LAYER = layer
+
         current_scale = get_layer_scale(layer)
         if current_scale is None:
             print("Failed to get current scale.")
             return
 
         if "set scale" in action_base and value is not None:
-            new_scale = max(value / 100, 0.01)
+            new_scale = max(min(normalize_percentage(value), 1.0), 0.0)
         else:
-            adjustment = (value / 100) * current_scale if value else 0.25 * current_scale
+            if value is None:
+                adjustment = 0.1 * current_scale
+            elif 0 < value <= 1:
+                adjustment = value * current_scale
+            else:
+                adjustment = (value / 100) * current_scale
 
             if "increase scale" in action_base:
                 new_scale = current_scale + adjustment
@@ -454,21 +499,22 @@ def command_to_function(command):
 
             new_scale = max(new_scale, 0.01)
 
-        if layer and layer != "all":
-            CURRENT_LAYER = layer
-
         return set_layer_scale_absolute(layer, new_scale)
 
     if action in ( "set volume", "increase volume", "decrease volume", "set the volume", 
                   "increase the volume", "decrease the volume","lower volume", "lower the volume") and layer:
-        print("ENTERED")
         action_base = action.replace("the ", "").strip()
+
+        if layer and layer != "all":
+            CURRENT_LAYER = layer
 
         if "set volume" in action_base:
             if value is None:
                 print(f"No volume value provided for layer {layer}.")
                 return
-            new_volume = max(min(value / 100, 1.0), 0.0)
+            #new_volume = max(min(value / 100, 1.0), 0.0)
+            new_volume = max(min(normalize_percentage(value), 1.0), 0.0)
+
             print(f"Setting volume to {new_volume} for layer {layer}")
             return set_layer_volume(layer, new_volume)
 
@@ -477,7 +523,12 @@ def command_to_function(command):
             print(f"Failed to get volume for layer {layer}.")
             return
 
-        adjustment = (value / 100) * current_volume if value else 0.1 * current_volume
+        if value is None:
+            adjustment = 0.1 * current_volume
+        elif 0 < value <= 1:
+            adjustment = value * current_volume
+        else:
+            adjustment = (value / 100) * current_volume
 
         if "increase volume" in action_base:
             new_volume = min(current_volume + adjustment, 1.0)
@@ -486,9 +537,6 @@ def command_to_function(command):
         else:
             return
         
-        if layer and layer != "all":
-            CURRENT_LAYER = layer
-
         return set_layer_volume(layer, new_volume)
 
     print("Don't understand command")
@@ -657,7 +705,7 @@ def listen_for_all_layer_changes():
                     old_name = id_to_name.get(layer_id)
 
                     if old_name != cleaned_name:
-                        print(f"✏️ Name changed for {layer_id}: '{old_name}' → '{cleaned_name}'")
+                        print(f"Name changed for {layer_id}: '{old_name}' → '{cleaned_name}'")
 
                         # Update dicts
                         if old_name in layer_dict:
@@ -798,49 +846,6 @@ def set_layer_lock(layer_id, lock):
     finally:
         client_socket.close()
 
-def get_layer_scale(layer_id):
-    """
-    Retrieves the current scale of a layer.
-
-    layer_id: Layer id of the layer whose scale is to be retrieved.
-    """
-    client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    client_socket.settimeout(1)
-
-    try:
-        auth_command = f"apikey?value={API_KEY}"
-        client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
-
-        api_command = f"layer/geometry/scale/get?id={layer_id}"
-        client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
-        print(f"Sent command: {api_command}")
-
-        start_time = time.time()
-
-        while time.time() - start_time < 5:  
-            try:
-                response, _ = client_socket.recvfrom(8192)
-                response_str = response.decode("utf-8", errors="ignore")
-                if "layer/geometry/scale/get" in response_str and "value=" in response_str:
-                    lines = response_str.splitlines()
-                    for line in lines:
-                        if "layer/geometry/scale/get" in line and "value=" in line:
-                            value_part = [part for part in line.split("+") if "value=" in part]
-                            if value_part:
-                                try:
-                                    return float(value_part[0].replace("value=", ""))
-                                except ValueError:
-                                    print("Failed to convert scale value to float:", value_part[0])
-                                    return None
-            except socket.timeout:
-                continue
-
-        print("Scale retrieval timed out.")
-        return None
-
-    finally:
-        client_socket.close()
-
 def set_layer_scale(layer_id, value, scale):
     """
     Adjusts the scale of a layer.
@@ -890,38 +895,45 @@ def set_layer_scale_absolute(layer_id, new_scale):
     finally:
         client_socket.close()
 
+def get_layer_scale(layer_id):
+    return get_layer_property(layer_id, "layer/geometry/scale/get", "layer/geometry/scale/get")
+
 def get_layer_volume(layer_id):
-    """
-    Gets the current volume of a layer.
-    """
+    return get_layer_property(layer_id, "layer/playback/volume/get", "layer/playback/volume/get")
+
+def get_layer_property(layer_id, endpoint, response_prefix, timeout=5):
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    client_socket.settimeout(1) 
+    client_socket.settimeout(1)
 
     try:
         auth_command = f"apikey?value={API_KEY}"
         client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
 
-        get_command = f"layer/playback/volume/get?id={layer_id}"
+        api_command = f"{endpoint}?id={layer_id}"
         start_time = time.time()
 
-        while time.time() - start_time < 5:
-            client_socket.sendto(get_command.encode(), SERVER_ADDRESS)
-
+        while time.time() - start_time < timeout:
+            client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
             try:
                 response, _ = client_socket.recvfrom(8192)
                 response_str = response.decode("utf-8", errors="ignore")
 
-                if "layer/playback/volume/get" in response_str and "value=" in response_str:
-                    value_part = [part for part in response_str.split("+") if "value=" in part]
-                    if value_part:
-                        return float(value_part[0].replace("value=", ""))
+                if response_prefix in response_str and "value=" in response_str:
+                    for line in response_str.splitlines():
+                        if response_prefix in line and "value=" in line:
+                            value_part = [part for part in line.split("+") if "value=" in part]
+                            if value_part:
+                                try:
+                                    return float(value_part[0].replace("value=", ""))
+                                except ValueError:
+                                    print(f"Failed to convert value: {value_part[0]}")
+                                    return None
             except socket.timeout:
-                continue 
-
+                continue
     finally:
         client_socket.close()
 
-    print("Failed to get volume within timeout.")
+    print(f"Failed to retrieve value for {endpoint} within timeout.")
     return None
 
 
@@ -1124,4 +1136,5 @@ if __name__ == "__main__":
     #listen_for_wake_word()
     #voice_command()
     #listen_for_all_layer_changes()    
+    # print(sd.query_devices())
     start_background_services()
