@@ -103,20 +103,26 @@ def command_loop():
     print("Entering command mode (say a command)...")
 
     while True:
+        total_start = time.time()
         speech_string = speech_to_text()
+        
 
         if not speech_string.strip():
             print("No speech detected. Returning to sleep mode.")
             break
 
+        t3 = time.time()
         parsed = parse_command(speech_string)
+        t4 = time.time()
         print(parsed)
+        print(f"[Timing] Parsing took: {t4 - t3:.2f} seconds")
 
         if not parsed["layer"] and not parsed["action"]:
             print("Command not understood. Returning to sleep mode.")
             break
         
         command_to_function(parsed)
+        
         print("Command executed. Listening for more... (or go silent to exit)")
         time.sleep(1)
 
@@ -127,28 +133,59 @@ def record_audio():
     """   
     print("Say something:")
     
+    t1 = time.time()
     audio_data = sd.rec(int(SAMPLE_RATE * DURATION), samplerate=SAMPLE_RATE, channels=1, dtype='int16')
     sd.wait()  
 
     wav.write(OUTPUT_FILE, SAMPLE_RATE, audio_data)
+    t2 = time.time()
+    print(f"[Timing] Recording took: {t2 - t1:.2f} seconds")
 
-def speech_to_text(): 
-    """
-    Converts speech to text using specified model.
-    """   
-    record_audio()
+def record_until_silence(filename="live_audio.wav", threshold=100, silence_duration=2.0, max_duration=8):
+    sample_rate = 44100
+    buffer_size = 1024
+    silence_limit = int(silence_duration * sample_rate / buffer_size)
+    silence_counter = 0
 
-    # Change model size here (tiny, base, small, medium, large, turbo)
-    model = WhisperModel("small", compute_type="auto")
+    recording = []
+    print("Listening...")
 
-    segments, info = model.transcribe(OUTPUT_FILE, language="en")
+    stream = sd.InputStream(samplerate=sample_rate, channels=1, dtype='int16')
+    with stream:
+        for _ in range(int(max_duration * sample_rate / buffer_size)):
+            audio_chunk, _ = stream.read(buffer_size)
+            rms = np.sqrt(np.mean(audio_chunk**2))
 
-    full_text = ""
-    for segment in segments:
-        full_text += segment.text + " "
+            recording.append(audio_chunk)
 
-    full_text = full_text.strip()
+            if rms < threshold:
+                silence_counter += 1
+            else:
+                silence_counter = 0
+
+            if silence_counter >= silence_limit:
+                print("Silence detected, stopping recording.")
+                break
+
+    full_audio = np.concatenate(recording, axis=0)
+
+    wav.write(filename, sample_rate, full_audio)
+    
+    return filename
+
+
+def speech_to_text():
+    filename = record_until_silence()
+    t1 = time.time()
+
+    model = WhisperModel("base", compute_type="auto")
+    segments, info = model.transcribe(filename, language="en")
+
+    full_text = " ".join(segment.text for segment in segments).strip()
     print("You said:", full_text)
+
+    t2 = time.time()
+    print(f"[Timing] Transcription took: {t2 - t1:.2f} seconds")
 
     return full_text.lower()
 
@@ -384,35 +421,38 @@ def command_to_function(command):
         
         if action in ("set scale", "increase scale", "decrease scale", "lower scale", "set the scale", 
                       "increase the scale", "decrease the scale", "lower the scale"):
+            
             action_base = action.replace("the ", "").strip()
 
             for layer_id in layer_dict.values():
+                if "set scale" in action_base and value is not None:
+                    new_scale = max(min(normalize_percentage(value), 1.0), 0.0)
+
+                    set_layer_scale(layer_id, new_scale)
+                    continue
+
                 current_scale = get_layer_scale(layer_id)
                 if current_scale is None:
                     print(f"Failed to get scale for layer {layer_id}. Skipping.")
                     continue
 
-                if "set scale" in action_base and value is not None:
-                    new_scale = max(min(normalize_percentage(value), 1.0), 0.0)
+                if value is None:
+                    adjustment = 0.1 * current_scale
+                elif 0 < value <= 1:
+                    adjustment = value * current_scale
                 else:
-                    if value is None:
-                        adjustment = 0.1 * current_scale
-                    elif 0 < value <= 1:
-                        adjustment = value * current_scale
-                    else:
-                        adjustment = (value / 100) * current_scale
+                    adjustment = (value / 100) * current_scale
 
 
-                    if "increase scale" in action_base:
-                        new_scale = current_scale + adjustment
-                    elif "decrease scale" in action_base or "lower scale" in action_base:
-                        new_scale = current_scale - adjustment
-                    else:
-                        continue
+                if "increase scale" in action_base:
+                    new_scale = min(current_scale + adjustment, 1.0)
+                    print(new_scale)
+                elif "decrease scale" in action_base or "lower scale" in action_base:
+                    new_scale = max(current_scale - adjustment, 0.0)
+                else:
+                    continue
 
-                    new_scale = max(new_scale, 0.01)
-
-                set_layer_scale_absolute(layer_id, new_scale)
+                set_layer_scale(layer_id, new_scale)
 
             return
 
@@ -423,7 +463,6 @@ def command_to_function(command):
 
             for layer_id in layer_dict.values():
                 if "set volume" in action_base and value is not None:
-                    #new_volume = max(min(value / 100, 1.0), 0.0)
                     new_volume = max(min(normalize_percentage(value), 1.0), 0.0)
 
                     set_layer_volume(layer_id, new_volume)
@@ -475,31 +514,35 @@ def command_to_function(command):
         if layer and layer != "all":
             CURRENT_LAYER = layer
 
+        if "set scale" in action_base:
+            if value is None:
+                print(f"No scale value provided for layer {layer}.")
+                return
+            new_scale = max(min(normalize_percentage(value), 1.0), 0.0)
+
+            print(f"Setting scale to {new_scale} for layer {layer}")
+            return set_layer_scale(layer, new_scale)
+
         current_scale = get_layer_scale(layer)
         if current_scale is None:
-            print("Failed to get current scale.")
+            print(f"Failed to get scale for layer {layer}.")
             return
 
-        if "set scale" in action_base and value is not None:
-            new_scale = max(min(normalize_percentage(value), 1.0), 0.0)
+        if value is None:
+            adjustment = 0.1 * current_scale
+        elif 0 < value <= 1:
+            adjustment = value * current_scale
         else:
-            if value is None:
-                adjustment = 0.1 * current_scale
-            elif 0 < value <= 1:
-                adjustment = value * current_scale
-            else:
-                adjustment = (value / 100) * current_scale
+            adjustment = (value / 100) * current_scale
 
-            if "increase scale" in action_base:
-                new_scale = current_scale + adjustment
-            elif "decrease scale" in action_base or "lower scale" in action_base:
-                new_scale = current_scale - adjustment
-            else:
-                new_scale = current_scale
-
-            new_scale = max(new_scale, 0.01)
-
-        return set_layer_scale_absolute(layer, new_scale)
+        if "increase scale" in action_base:
+            new_scale = min(current_scale + adjustment, 1.0)
+        elif "decrease scale" in action_base or "lower scale" in action_base:
+            new_scale = max(current_scale - adjustment, 0.0)
+        else:
+            return
+        
+        return set_layer_scale(layer, new_scale)
 
     if action in ( "set volume", "increase volume", "decrease volume", "set the volume", 
                   "increase the volume", "decrease the volume","lower volume", "lower the volume") and layer:
@@ -512,7 +555,6 @@ def command_to_function(command):
             if value is None:
                 print(f"No volume value provided for layer {layer}.")
                 return
-            #new_volume = max(min(value / 100, 1.0), 0.0)
             new_volume = max(min(normalize_percentage(value), 1.0), 0.0)
 
             print(f"Setting volume to {new_volume} for layer {layer}")
@@ -610,7 +652,7 @@ def listen_for_all_layer_changes():
     """
     Authenticates, fetches initial layer list, subscribes to name updates,
     and continuously listens for all changes (add, remove, rename).
-    Updates global `layer_dict` accordingly.
+    Updates global `layer_dict` when an update is detected.
     """
     global layer_dict
 
@@ -846,50 +888,20 @@ def set_layer_lock(layer_id, lock):
     finally:
         client_socket.close()
 
-def set_layer_scale(layer_id, value, scale):
+def set_layer_scale(layer_id, value):
     """
-    Adjusts the scale of a layer.
+    Sets the scale of a layer to a given value (0-1).
 
-    layer_id: Layer id for layer to be scaled.
-    value (int): Percentage change (e.g., 50 for +50% or -50 for -50%).
-    scale (bool): True -> Scale up, False -> Scale down.
-    """
-    client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-
-    try:
-        current_scale = get_layer_scale(layer_id)
-        if current_scale is None:
-            print("Failed to retrieve current scale.")
-            return
-
-        adjustment = (value / 100) * current_scale
-        new_scale = current_scale + adjustment if scale else current_scale - adjustment
-        new_scale = max(new_scale, 0.01)
-
-        auth_command = f"apikey?value={API_KEY}"
-        client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
-
-        api_command = f"layer/geometry/scale/set?id={layer_id}+value={new_scale}"
-        client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
-
-    finally:
-        client_socket.close()
-
-def set_layer_scale_absolute(layer_id, new_scale):
-    """
-    Directly sets the scale of a layer to an absolute value.
-
-    layer_id: Layer id for layer to be scaled.
-    new_scale (int): Scale for layer to be set to.
+    layer_id: layer_id for video layer.
+    value (float): final volume for scale.
     """
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
     try:
-        new_scale = max(new_scale, 0.01)  
         auth_command = f"apikey?value={API_KEY}"
         client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
 
-        api_command = f"layer/geometry/scale/set?id={layer_id}+value={new_scale}"
+        api_command = f"layer/geometry/scale/set?id={layer_id}+value={value}"
         client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
 
     finally:
@@ -939,10 +951,10 @@ def get_layer_property(layer_id, endpoint, response_prefix, timeout=5):
 
 def set_layer_volume(layer_id, value):
     """
-    Sets the volume of a layer to a given value (0-100).
+    Sets the volume of a layer to a given value (0-1).
 
-    layer_id = layer_id for video layer.
-    value = the adjustment value, not the final value.
+    layer_id: layer_id for video layer.
+    value(float): final value for volume.
     """
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
