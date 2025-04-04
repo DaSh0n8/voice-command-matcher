@@ -14,6 +14,9 @@ import re
 from spacy.matcher import Matcher
 from faster_whisper import WhisperModel
 from rapidfuzz import fuzz, process
+import torch
+import torchaudio
+import torch.nn.functional as F
 
 # Load configuration from config.json
 def load_config():
@@ -78,10 +81,6 @@ current_session_id = None
 current_session_name = None
 layer_dict = {}
 
-SAMPLE_RATE = 44100  
-DURATION = 4
-OUTPUT_FILE = "live_audio.wav"  
-
 def start_background_services():
     """
     Start 2 background threads - listener for layer changes and wake word detector.
@@ -106,7 +105,6 @@ def command_loop():
         total_start = time.time()
         speech_string = speech_to_text()
         
-
         if not speech_string.strip():
             print("No speech detected. Returning to sleep mode.")
             break
@@ -126,53 +124,124 @@ def command_loop():
         print("Command executed. Listening for more... (or go silent to exit)")
         time.sleep(1)
 
-def record_audio():
+
+def record_until_silence(filename="live_audio.wav", threshold=0.999, silence_duration=2.0, max_duration=8):
     """
-    Records user speech and turns it into a .wav file.
-    Uses default microphone, and records for a set duration.
-    """   
-    print("Say something:")
-    
-    t1 = time.time()
-    audio_data = sd.rec(int(SAMPLE_RATE * DURATION), samplerate=SAMPLE_RATE, channels=1, dtype='int16')
-    sd.wait()  
-
-    wav.write(OUTPUT_FILE, SAMPLE_RATE, audio_data)
-    t2 = time.time()
-    print(f"[Timing] Recording took: {t2 - t1:.2f} seconds")
-
-def record_until_silence(filename="live_audio.wav", threshold=100, silence_duration=2.0, max_duration=8):
+    Records audio in chunks, using Silero VAD to detect silence.
+    The first 3 seconds (initial_grace_chunks) are a grace period where silence is ignored.
+    After that, if speech probability (averaged over the chunk) is below `threshold` for 
+    a duration equal to `silence_duration`, recording stops.
+    Also prints elapsed listening time every second.
+    """
     sample_rate = 44100
     buffer_size = 1024
+
+    # Calculate how many consecutive chunks of silence constitute the silence threshold (2 seconds)
     silence_limit = int(silence_duration * sample_rate / buffer_size)
     silence_counter = 0
+
+    # Calculate how many chunks correspond to the initial 3-second grace period
+    initial_grace_chunks = int(2 * sample_rate / buffer_size)
 
     recording = []
     print("Listening...")
 
+    # Load Silero VAD model and set up a resampler (from 44100 to 16000 Hz)
+    vad_model, utils = torch.hub.load("snakers4/silero-vad", "silero_vad", force_reload=False)
+    vad_model.eval()
+    resampler = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=16000)
+
+    start_time = time.time()
+    last_printed_second = 0
+
     stream = sd.InputStream(samplerate=sample_rate, channels=1, dtype='int16')
     with stream:
-        for _ in range(int(max_duration * sample_rate / buffer_size)):
+        total_chunks = int(max_duration * sample_rate / buffer_size)
+        for i in range(total_chunks):
+            current_time = time.time()
+            elapsed_time = current_time - start_time
+            if int(elapsed_time) > last_printed_second:
+                print(f"Listening for {int(elapsed_time)} seconds")
+                last_printed_second = int(elapsed_time)
+            
             audio_chunk, _ = stream.read(buffer_size)
-            rms = np.sqrt(np.mean(audio_chunk**2))
+
+            audio_tensor = torch.tensor(audio_chunk.astype(np.float32)).transpose(0, 1) / 32768.0
+            audio_tensor = resampler(audio_tensor)
+            
+            min_samples = 512
+            if audio_tensor.shape[1] < min_samples:
+                pad_length = min_samples - audio_tensor.shape[1]
+                audio_tensor = F.pad(audio_tensor, (0, pad_length))
+
+            with torch.no_grad():
+                speech_prob = vad_model(audio_tensor, 16000)
+            speech_prob_value = speech_prob.mean().item()
 
             recording.append(audio_chunk)
 
-            if rms < threshold:
-                silence_counter += 1
-            else:
-                silence_counter = 0
+            if i >= initial_grace_chunks:
+                if speech_prob_value < threshold:
+                    silence_counter += 1
+                else:
+                    silence_counter = 0
 
-            if silence_counter >= silence_limit:
-                print("Silence detected, stopping recording.")
-                break
+                if silence_counter >= silence_limit:
+                    print("Silence detected, stopping recording.")
+                    break
 
     full_audio = np.concatenate(recording, axis=0)
-
     wav.write(filename, sample_rate, full_audio)
-    
+
     return filename
 
+def old_record(filename="live_audio.wav", threshold=200, silence_duration=2.0, max_duration=8):
+    """
+    Records audio in chunks, and calculates rms to detect silence
+    """
+    sample_rate = 44100
+    buffer_size = 1024
+
+    silence_limit = int(silence_duration * sample_rate / buffer_size)
+    silence_counter = 0
+
+    initial_grace_chunks = int(3 * sample_rate / buffer_size)
+
+    recording = []
+    print("Listening...")
+
+    start_time = time.time()
+    last_printed_second = 0
+
+    stream = sd.InputStream(samplerate=sample_rate, channels=1, dtype='int16')
+    with stream:
+        total_chunks = int(max_duration * sample_rate / buffer_size)
+        for i in range(total_chunks):
+            current_time = time.time()
+            elapsed_time = current_time - start_time
+            if int(elapsed_time) > last_printed_second:
+                print(f"Listening for {int(elapsed_time)} seconds")
+                last_printed_second = int(elapsed_time)
+            
+            audio_chunk, _ = stream.read(buffer_size)
+            rms = np.sqrt(np.mean(audio_chunk**2))
+            
+            recording.append(audio_chunk)
+
+            if i >= initial_grace_chunks:
+                if rms < threshold:
+                    silence_counter += 1
+                else:
+                    silence_counter = 0
+
+                if silence_counter >= silence_limit:
+                    print("Silence detected, stopping recording.")
+                    break
+
+    full_audio = np.concatenate(recording, axis=0)
+    wav.write(filename, sample_rate, full_audio)
+
+    return filename
 
 def speech_to_text():
     filename = record_until_silence()
@@ -189,6 +258,7 @@ def speech_to_text():
 
     return full_text.lower()
 
+
 nlp = spacy.load("en_core_web_sm")
 matcher = Matcher(nlp.vocab)
 
@@ -199,7 +269,9 @@ action_patterns = [
     [{"LOWER": "select"}], [{"LOWER": "pin"}], [{"LOWER": "unpin"}], [{"LOWER": "snap"}], 
     [{"LOWER": "lock"}], [{"LOWER": "enable"}], [{"LOWER": "disable"}], [{"LOWER": "add"}],
     [{"LOWER": "play"}], [{"LOWER": "please"}], [{"LOWER": "pause"}], [{"LOWER": "stop"}],
-    [{"LOWER": "add"}], [{"LOWER": "create"}],
+    [{"LOWER": "add"}], [{"LOWER": "create"}], [{"LOWER": "shift"}], [{"LOWER": "align"}],
+    [{"LOWER": "bring"}], [{"LOWER": "put"}], [{"LOWER": "position"}], [{"LOWER": "reposition"}],
+    [{"LOWER": "place"}], [{"LOWER": "front"}], [{"LOWER": "back"}],
     
     # For Scale
     [{"LOWER": "minimize"}], [{"LOWER": "shrink"}], [{"LOWER": "minimized"}],
@@ -211,6 +283,13 @@ action_patterns = [
     [{"LOWER": "decrease"}, {"LOWER": "the"}, {"LOWER": "scale"}],
     [{"LOWER": "lower"}, {"LOWER": "the"}, {"LOWER": "scale"}],
     [{"LOWER": "set"}, {"LOWER": "the"}, {"LOWER": "scale"}],
+    [{"LOWER": "set"}, {"LOWER": "size"}],
+    [{"LOWER": "increase"}, {"LOWER": "size"}],
+    [{"LOWER": "decrease"}, {"LOWER": "size"}],
+    [{"LOWER": "increase"}, {"LOWER": "the"}, {"LOWER": "size"}],
+    [{"LOWER": "decrease"}, {"LOWER": "the"}, {"LOWER": "size"}],
+    [{"LOWER": "lower"}, {"LOWER": "the"}, {"LOWER": "size"}],
+    [{"LOWER": "set"}, {"LOWER": "the"}, {"LOWER": "size"}],
 
     # For volume
     [{"LOWER": "set"}, {"LOWER": "volume"}],
@@ -227,6 +306,8 @@ matcher.add("ACTION", action_patterns)
 # Value patterns
 value_patterns = [
     [{"LOWER": "by"}, {"TEXT": {"REGEX": r"^\d*\.?\d+$"}}, {"TEXT": {"REGEX": "%|px|pixels"}}],
+
+    [{"LOWER": "zero"}],
     
     [{"TEXT": {"REGEX": r"^\d*\.?\d+$"}}, {"TEXT": {"REGEX": "%|px|pixels"}}],
     
@@ -249,6 +330,32 @@ type_patterns = [
     [{"LOWER": "loopback"}], [{"LOWER": "appview"}],
 ]
 matcher.add("TYPE", type_patterns)
+
+# Direction patterns for moving layers
+direction_patterns = [
+    [{"LOWER": "top"}, {"LOWER": "left"}],
+    [{"LOWER": "top"}, {"LOWER": "right"}],
+    [{"LOWER": "bottom"}, {"LOWER": "left"}],
+    [{"LOWER": "bottom"}, {"LOWER": "right"}],
+
+    [{"LOWER": "left"}], [{"LOWER": "right"}], [{"LOWER": "up"}], [{"LOWER": "down"}],
+    [{"LOWER": "upward"}], [{"LOWER": "downward"}],
+    [{"LOWER": "bottom"}], [{"LOWER": "center"}], [{"LOWER": "middle"}], [{"LOWER": "top"}],
+    [{"LOWER": "horizontal"}], [{"LOWER": "vertical"}], [{"LOWER": "x"}], [{"LOWER": "y"}],
+]
+matcher.add("DIRECTION", direction_patterns)
+
+SCALE_ACTIONS = (
+    "set scale", "increase scale", "decrease scale", "lower scale", "set the scale",
+    "increase the scale", "decrease the scale", "lower the scale", "set size",
+    "increase size", "decrease size", "lower size", "set the size", "increase the size",
+    "decrease the size", "lower the size"
+)
+
+VOLUME_ACTIONS = (
+    "set volume", "increase volume", "decrease volume", "set the volume", 
+    "increase the volume", "decrease the volume", "lower volume", "lower the volume"
+)
 
 def clean_text(text):
     """
@@ -326,25 +433,33 @@ def normalize_percentage(value):
 def parse_command(command):
     """
     Extracts the action, layer, and value from a speech command.
-
     command (str): User's command transcribed by Whisper.
     """
     doc = nlp(command)
     matches = matcher(doc)
 
-    extracted = {"action": None, "layer": None, "value": None, "type": None}
+    extracted = {"action": None, "layer": None, "value": None, "type": None, "direction": None}
 
+    direction_matches = []
     for match_id, start, end in matches:
-        label = nlp.vocab.strings[match_id]  
-        entity_text = doc[start:end].text.strip().lower()
+        label = nlp.vocab.strings[match_id]
+        if label == "DIRECTION":
+            direction_matches.append((start, end))
+        else:
+            entity_text = doc[start:end].text.strip().lower()
+            if label == "ACTION":
+                extracted["action"] = entity_text
+            elif label == "VALUE":
+                extracted["value"] = entity_text
+            elif label == "TYPE":
+                extracted["type"] = entity_text
 
-        if label == "ACTION":
-            extracted["action"] = entity_text
-        elif label == "VALUE":
-            extracted["value"] = entity_text
-        elif label == "TYPE":
-            extracted["type"] = entity_text
-    
+    # Finding the longest match, because the system would pick 'left' rather than 'top left'
+    if direction_matches:
+        direction_matches.sort(key=lambda span: span[1]-span[0], reverse=True)
+        best_start, best_end = direction_matches[0]
+        extracted["direction"] = doc[best_start:best_end].text.strip().lower()
+
     if extracted["value"]:
         extracted["value"] = process_numeric_value(extracted["value"])
 
@@ -372,6 +487,7 @@ def command_to_function(command):
     action = command.get("action")
     layer = command.get("layer")
     value = command.get("value")
+    direction = command.get("direction")
 
     # If the user doesn't specify layer, use layer from previous command
     print("layer : " , layer , "CURRENT_LAYER: " , CURRENT_LAYER)
@@ -397,6 +513,8 @@ def command_to_function(command):
         ("select", True): select_layer,
         ("remove", True): remove_layer,
         ("delete", True): remove_layer,
+        ("front", True): move_layer_front,
+        ("back", True): move_layer_back,
         ("pin", True): lambda l: set_layer_pin(l, True),
         ("unpin", True): lambda l: set_layer_pin(l, False),
         ("lock", True): lambda l: set_layer_lock(l, True),
@@ -408,7 +526,7 @@ def command_to_function(command):
         ("play", True): play_video,
         ("please", True): play_video,
         ("pause", True): pause_video,
-        ("stop", True): stop_video
+        ("stop", True): stop_video,
     }
 
     if layer == "all":
@@ -419,13 +537,12 @@ def command_to_function(command):
                 func(layer_id)
             return
         
-        if action in ("set scale", "increase scale", "decrease scale", "lower scale", "set the scale", 
-                      "increase the scale", "decrease the scale", "lower the scale"):
-            
+        if action in (SCALE_ACTIONS):
+
             action_base = action.replace("the ", "").strip()
 
             for layer_id in layer_dict.values():
-                if "set scale" in action_base and value is not None:
+                if ("set scale" in action_base or "set size" in action_base) and value is not None:
                     new_scale = max(min(normalize_percentage(value), 1.0), 0.0)
 
                     set_layer_scale(layer_id, new_scale)
@@ -443,11 +560,10 @@ def command_to_function(command):
                 else:
                     adjustment = (value / 100) * current_scale
 
-
-                if "increase scale" in action_base:
+                if "increase scale" in action_base or "increase size" in action_base:
                     new_scale = min(current_scale + adjustment, 1.0)
                     print(new_scale)
-                elif "decrease scale" in action_base or "lower scale" in action_base:
+                elif "decrease scale" in action_base or "lower scale" in action_base or "decrease size" in action_base:
                     new_scale = max(current_scale - adjustment, 0.0)
                 else:
                     continue
@@ -456,8 +572,7 @@ def command_to_function(command):
 
             return
 
-        if action in ("set volume", "increase volume", "decrease volume", "set the volume", "increase the volume", 
-              "decrease the volume", "lower volume", "lower the volume"):
+        if action in (VOLUME_ACTIONS):
 
             action_base = action.replace("the ", "").strip()
 
@@ -507,14 +622,13 @@ def command_to_function(command):
         shrink_value = value if value else 25
         return set_layer_scale(layer, shrink_value, False)
     
-    if action in ("set scale", "increase scale", "decrease scale", "lower scale",
-        "set the scale", "increase the scale", "decrease the scale", "lower the scale") and layer:
+    if action in (SCALE_ACTIONS) and layer:
         action_base = action.replace("the ", "").strip()
 
         if layer and layer != "all":
             CURRENT_LAYER = layer
 
-        if "set scale" in action_base:
+        if "set scale" in action_base or "set size" in action_base:
             if value is None:
                 print(f"No scale value provided for layer {layer}.")
                 return
@@ -535,17 +649,16 @@ def command_to_function(command):
         else:
             adjustment = (value / 100) * current_scale
 
-        if "increase scale" in action_base:
+        if "increase scale" in action_base or "increase size" in action_base:
             new_scale = min(current_scale + adjustment, 1.0)
-        elif "decrease scale" in action_base or "lower scale" in action_base:
+        elif "decrease scale" in action_base or "lower scale" in action_base or "decrease size" in action_base:
             new_scale = max(current_scale - adjustment, 0.0)
         else:
             return
         
         return set_layer_scale(layer, new_scale)
 
-    if action in ( "set volume", "increase volume", "decrease volume", "set the volume", 
-                  "increase the volume", "decrease the volume","lower volume", "lower the volume") and layer:
+    if action in (VOLUME_ACTIONS) and layer:
         action_base = action.replace("the ", "").strip()
 
         if layer and layer != "all":
@@ -866,6 +979,63 @@ def layer_position(layer_id, position_mode):
     finally:
         client_socket.close()
 
+def move_layer_front(layer_id):
+    """
+    Moves a layer to the front
+
+    layer_id: Layer id for layer to be moved.
+    """
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    try:
+        auth_command = f"apikey?value={API_KEY}"
+        client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
+
+        api_command = f"layer/toFront?id={layer_id}"
+        client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
+        print(f"Sent command: {api_command}")
+
+    finally:
+        client_socket.close()
+
+def move_layer_back(layer_id):
+    """
+    Moves a layer to the back
+
+    layer_id: Layer id for layer to be moved.
+    """
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    try:
+        auth_command = f"apikey?value={API_KEY}"
+        client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
+
+        api_command = f"layer/toBack?id={layer_id}"
+        client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
+        print(f"Sent command: {api_command}")
+
+    finally:
+        client_socket.close()
+
+def move_to_region(layer_id, region_index):
+    """
+    Moves a layer to a specific region
+
+    layer_id: Layer id for layer to be moved.
+    """
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    try:
+        auth_command = f"apikey?value={API_KEY}"
+        client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
+
+        api_command = f"layer/geometry/moveToRegion?id={layer_id}+layoutIndex=0+regionIndex={region_index}"
+        client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
+        print(f"Sent command: {api_command}")
+
+    finally:
+        client_socket.close()
+
 def set_layer_lock(layer_id, lock):
     """
     Locks or unlocks a layer.
@@ -1034,7 +1204,7 @@ def save_session(name):
     finally:
         client_socket.close()
 
-def position_layer(layer_id,x,y):
+def set_layer_position(layer_id,x,y):
     """
     Changes the position of a layer
 
@@ -1146,7 +1316,7 @@ def get_regions():
 
 if __name__ == "__main__":
     #listen_for_wake_word()
-    #voice_command()
     #listen_for_all_layer_changes()    
     # print(sd.query_devices())
     start_background_services()
+    
