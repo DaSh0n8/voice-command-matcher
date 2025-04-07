@@ -35,6 +35,7 @@ SERVER_ADDRESS = (IGLOO_SERVER_IP, IGLOO_SERVER_PORT)
 WAKE_WORD_PATH = "Hey-Igloo_en_mac_v3_0_0/Hey-Igloo_en_mac_v3_0_0.ppn" 
 
 CURRENT_LAYER = None
+
 LAST_FN = None
 
 porcupine = pvporcupine.create(
@@ -80,23 +81,33 @@ def listen_for_wake_word():
 current_session_id = None
 current_session_name = None
 layer_dict = {}
+layer_volume_dict = {} 
 
 def start_background_services():
     """
-    Start 2 background threads - listener for layer changes and wake word detector.
+    Start 3 background threads - listener for layer changes, layer volume changes and wake word detector.
     """
     layer_thread = threading.Thread(target=listen_for_all_layer_changes, daemon=True)
     
     wake_thread = threading.Thread(target=listen_for_wake_word, daemon=True)
 
+    volume_thread = threading.Thread(target=listen_for_layer_volumes, daemon=True)
+
     layer_thread.start()
     wake_thread.start()
+    time.sleep(1)
 
-    wake_thread.join()
+    volume_thread.start()
+
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("Shutting down...")
 
 def command_loop():
     """
-    Continuously listens for commands for 4-second intervals.
+    Continuously listens for commands.
     Exits loop if no valid command is detected.
     """
     print("Entering command mode (say a command)...")
@@ -118,9 +129,11 @@ def command_loop():
         if not parsed["layer"] and not parsed["action"]:
             print("Command not understood. Returning to sleep mode.")
             break
-        
+        t5 = time.time()
         command_to_function(parsed)
-        
+        t6 = time.time()
+
+        print(f"[Timing] Command execution took: {t6 - t5:.2f} seconds")
         print("Command executed. Listening for more... (or go silent to exit)")
         time.sleep(1)
 
@@ -136,14 +149,20 @@ def record_until_silence(filename="live_audio.wav", threshold=0.999, silence_dur
     sample_rate = 44100
     buffer_size = 1024
 
-    # Calculate how many consecutive chunks of silence constitute the silence threshold (2 seconds)
+    # Calculate how many consecutive chunks of silence make up the silence duration
     silence_limit = int(silence_duration * sample_rate / buffer_size)
     silence_counter = 0
 
-    # Calculate how many chunks correspond to the initial 3-second grace period
+    # Do the same for initial grace period, int we multiply sample_rate by is the number of seconds
     initial_grace_chunks = int(2 * sample_rate / buffer_size)
 
     recording = []
+
+    original_volumes = {layer_id: layer_volume_dict.get(layer_id, 0.5) for layer_id in layer_dict.values()}
+
+    for layer in layer_dict.values():
+        set_layer_volume(layer, 0.05)
+
     print("Listening...")
 
     # Load Silero VAD model and set up a resampler (from 44100 to 16000 Hz)
@@ -192,6 +211,10 @@ def record_until_silence(filename="live_audio.wav", threshold=0.999, silence_dur
 
     full_audio = np.concatenate(recording, axis=0)
     wav.write(filename, sample_rate, full_audio)
+
+    for name, layer_id in layer_dict.items():
+        original_volume = original_volumes.get(layer_id, 0.5)
+        set_layer_volume(layer_id, original_volume)
 
     return filename
 
@@ -299,7 +322,8 @@ action_patterns = [
     [{"LOWER": "increase"}, {"LOWER": "the"}, {"LOWER": "volume"}],
     [{"LOWER": "decrease"}, {"LOWER": "the"}, {"LOWER": "volume"}],
     [{"LOWER": "lower"}, {"LOWER": "the"}, {"LOWER": "volume"}],
-    [{"LOWER": "set"}, {"LOWER": "the"}, {"LOWER": "volume"}]
+    [{"LOWER": "set"}, {"LOWER": "the"}, {"LOWER": "volume"}],
+    [{"LOWER": "mute"}], [{"LOWER": "unmute"}],
 ]
 matcher.add("ACTION", action_patterns)
 
@@ -307,7 +331,7 @@ matcher.add("ACTION", action_patterns)
 value_patterns = [
     [{"LOWER": "by"}, {"TEXT": {"REGEX": r"^\d*\.?\d+$"}}, {"TEXT": {"REGEX": "%|px|pixels"}}],
 
-    [{"LOWER": "zero"}],
+    [{"LOWER": "zero"}], 
     
     [{"TEXT": {"REGEX": r"^\d*\.?\d+$"}}, {"TEXT": {"REGEX": "%|px|pixels"}}],
     
@@ -450,7 +474,10 @@ def parse_command(command):
             if label == "ACTION":
                 extracted["action"] = entity_text
             elif label == "VALUE":
-                extracted["value"] = entity_text
+                if entity_text == 'zero':
+                    extracted["value"] = '0'
+                else:
+                    extracted["value"] = entity_text
             elif label == "TYPE":
                 extracted["type"] = entity_text
 
@@ -523,6 +550,8 @@ def command_to_function(command):
         ("unhide", True): lambda l: set_layer_visibility(l, True),
         ("disable", True): lambda l: set_layer_visibility(l, False),
         ("hide", True): lambda l: set_layer_visibility(l, False),
+        ("mute", True): lambda l: set_video_mute(l, 1),
+        ("unmute", True): lambda l: set_video_mute(l, 0),
         ("play", True): play_video,
         ("please", True): play_video,
         ("pause", True): pause_video,
@@ -562,7 +591,6 @@ def command_to_function(command):
 
                 if "increase scale" in action_base or "increase size" in action_base:
                     new_scale = min(current_scale + adjustment, 1.0)
-                    print(new_scale)
                 elif "decrease scale" in action_base or "lower scale" in action_base or "decrease size" in action_base:
                     new_scale = max(current_scale - adjustment, 0.0)
                 else:
@@ -598,7 +626,6 @@ def command_to_function(command):
 
                 if "increase volume" in action_base:
                     new_volume = min(current_volume + adjustment, 1.0)
-                    print(new_volume)
                 elif "decrease volume" in action_base or "lower volume" in action_base:
                     new_volume = max(current_volume - adjustment, 0.0)
                 else:
@@ -663,7 +690,7 @@ def command_to_function(command):
 
         if layer and layer != "all":
             CURRENT_LAYER = layer
-
+        
         if "set volume" in action_base:
             if value is None:
                 print(f"No volume value provided for layer {layer}.")
@@ -867,6 +894,45 @@ def listen_for_all_layer_changes():
                             del layer_dict[old_name]
                         id_to_name[layer_id] = cleaned_name
                         layer_dict[cleaned_name] = layer_id
+
+            except socket.timeout:
+                continue
+
+    finally:
+        client_socket.close()
+
+def listen_for_layer_volumes():
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    client_socket.settimeout(3)
+
+    client_socket.sendto(f"apikey?value={API_KEY}".encode(), SERVER_ADDRESS)
+
+    try:
+        for layer_name, layer_id in layer_dict.items():
+            try:
+                vol = get_layer_volume(layer_id)
+                layer_volume_dict[layer_id] = vol
+
+                sub_cmd = f"layer/playback/volume/subscribe?id={layer_id}"
+                client_socket.sendto(sub_cmd.encode(), SERVER_ADDRESS)
+                print(f"Subscribed to volume changes for {layer_id}")
+            except Exception as e:
+                print(f"[Volume] Skipping layer {layer_id} — doesn't support volume")
+
+        # Continuously listen for volume updates
+        while True:
+            try:
+                response, _ = client_socket.recvfrom(4096)
+                response_str = response.decode("utf-8", errors="ignore")
+                
+                if "layer/playback/volume/get" in response_str:
+                    parts = response_str.split("+")
+                    layer_id = parts[0].split("id=")[-1]
+                    value_part = [p for p in parts if p.startswith("value=")]
+                    volume = float(value_part[0].replace("value=", "")) if value_part else None
+
+                    if volume is not None:
+                        layer_volume_dict[layer_id] = volume
 
             except socket.timeout:
                 continue
@@ -1083,7 +1149,7 @@ def get_layer_scale(layer_id):
 def get_layer_volume(layer_id):
     return get_layer_property(layer_id, "layer/playback/volume/get", "layer/playback/volume/get")
 
-def get_layer_property(layer_id, endpoint, response_prefix, timeout=5):
+def get_layer_property(layer_id, endpoint, response_prefix, timeout=1):
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     client_socket.settimeout(1)
 
@@ -1276,6 +1342,25 @@ def stop_video(layer_id):
         client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
 
         api_command = f"layer/playback/stop?id={layer_id}"
+        client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
+        print(f"Sent command: {api_command}")
+
+    finally:
+        client_socket.close()
+
+def set_video_mute(layer_id, value):
+    """
+    Mutes or unmutes a video layer.
+
+    layer_id: Layer id for video/ Youtube layer.
+    """
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    try:
+        auth_command = f"apikey?value={API_KEY}"
+        client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
+
+        api_command = f"layer/playback/mute/set?id={layer_id}+value={value}"
         client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
         print(f"Sent command: {api_command}")
 
