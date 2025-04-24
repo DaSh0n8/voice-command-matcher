@@ -75,7 +75,15 @@ def listen_for_wake_word():
 
         if keyword_index >= 0:
             print("Wake word detected!")
+            
+            # Hide sleep icon
+            set_layer_visibility("f96bebb1-c7c1-018c-f671-9dce83fc8388", False)
             command_loop() 
+            # Hide processing icon
+            set_layer_visibility("ce12da2f-fb36-1b92-f654-27d4ed2cadf7", False)
+
+            # Display sleep icon
+            set_layer_visibility("f96bebb1-c7c1-018c-f671-9dce83fc8388", True)
             print("Returning to sleep mode...")
 
 current_session_id = None
@@ -138,7 +146,7 @@ def command_loop():
         time.sleep(1)
 
 
-def record_until_silence(filename="live_audio.wav", threshold=0.999, silence_duration=2.0, max_duration=8):
+def record_until_silence(filename="live_audio.wav", threshold=0.80, silence_duration=2.0, max_duration=15):
     """
     Records audio in chunks, using Silero VAD to detect silence.
     The first 3 seconds (initial_grace_chunks) are a grace period where silence is ignored.
@@ -164,6 +172,10 @@ def record_until_silence(filename="live_audio.wav", threshold=0.999, silence_dur
         set_layer_volume(layer, 0.05)
 
     print("Listening...")
+    # Hide
+    set_layer_visibility("f87fc8c1-b763-d236-8f36-3547a4c8540a", False)
+    # Display listening icon
+    set_layer_visibility("60bcc1b7-7d58-1885-4b23-c77bb1f5be26", True)
 
     # Load Silero VAD model and set up a resampler (from 44100 to 16000 Hz)
     vad_model, utils = torch.hub.load("snakers4/silero-vad", "silero_vad", force_reload=False)
@@ -207,6 +219,10 @@ def record_until_silence(filename="live_audio.wav", threshold=0.999, silence_dur
 
                 if silence_counter >= silence_limit:
                     print("Silence detected, stopping recording.")
+                    # Hide Listening icon
+                    set_layer_visibility("60bcc1b7-7d58-1885-4b23-c77bb1f5be26", False)
+                    # Display Processing icon
+                    set_layer_visibility("ce12da2f-fb36-1b92-f654-27d4ed2cadf7", True)
                     break
 
     full_audio = np.concatenate(recording, axis=0)
@@ -294,7 +310,8 @@ action_patterns = [
     [{"LOWER": "play"}], [{"LOWER": "please"}], [{"LOWER": "pause"}], [{"LOWER": "stop"}],
     [{"LOWER": "add"}], [{"LOWER": "create"}], [{"LOWER": "shift"}], [{"LOWER": "align"}],
     [{"LOWER": "bring"}], [{"LOWER": "put"}], [{"LOWER": "position"}], [{"LOWER": "reposition"}],
-    [{"LOWER": "place"}], [{"LOWER": "front"}], [{"LOWER": "back"}],
+    [{"LOWER": "place"}], [{"LOWER": "front"}], [{"LOWER": "back"}], [{"LOWER": "forward"}],
+    [{"LOWER": "backward"}], 
     
     # For Scale
     [{"LOWER": "minimize"}], [{"LOWER": "shrink"}], [{"LOWER": "minimized"}],
@@ -487,7 +504,7 @@ def parse_command(command):
         best_start, best_end = direction_matches[0]
         extracted["direction"] = doc[best_start:best_end].text.strip().lower()
 
-    if extracted["value"]:
+    if extracted["value"] and extracted["value"] != "session":
         extracted["value"] = process_numeric_value(extracted["value"])
 
     best_layer_match = find_best_layer_match(command, layer_dict)
@@ -542,6 +559,8 @@ def command_to_function(command):
         ("delete", True): remove_layer,
         ("front", True): move_layer_front,
         ("back", True): move_layer_back,
+        ("forward", True): lambda l: move_layer(l, 1, "up"),
+        ("backward", True): lambda l: move_layer(l, 1, "down"),
         ("pin", True): lambda l: set_layer_pin(l, True),
         ("unpin", True): lambda l: set_layer_pin(l, False),
         ("lock", True): lambda l: set_layer_lock(l, True),
@@ -552,6 +571,7 @@ def command_to_function(command):
         ("hide", True): lambda l: set_layer_visibility(l, False),
         ("mute", True): lambda l: set_video_mute(l, 1),
         ("unmute", True): lambda l: set_video_mute(l, 0),
+        ("move", True): lambda l: move_to_region(l, value),
         ("play", True): play_video,
         ("please", True): play_video,
         ("pause", True): pause_video,
@@ -1404,4 +1424,3 @@ if __name__ == "__main__":
     #listen_for_all_layer_changes()    
     # print(sd.query_devices())
     start_background_services()
-    
