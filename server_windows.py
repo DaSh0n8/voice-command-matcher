@@ -126,7 +126,7 @@ def command_loop():
     while True:
         total_start = time.time()
         speech_string = speech_to_text()
-        
+        print("Reached")
         if not speech_string.strip():
             print("No speech detected. Returning to sleep mode.")
             break
@@ -319,7 +319,7 @@ action_patterns = [
     [{"LOWER": "add"}], [{"LOWER": "create"}], [{"LOWER": "shift"}], [{"LOWER": "align"}],
     [{"LOWER": "bring"}], [{"LOWER": "put"}], [{"LOWER": "position"}], [{"LOWER": "reposition"}],
     [{"LOWER": "place"}], [{"LOWER": "front"}], [{"LOWER": "back"}], [{"LOWER": "forward"}],
-    [{"LOWER": "backward"}], 
+    [{"LOWER": "backward"}], [{"LOWER": "load"}], 
     
     # For Scale
     [{"LOWER": "minimize"}], [{"LOWER": "shrink"}], [{"LOWER": "minimized"}],
@@ -519,6 +519,19 @@ def parse_command(command):
     if best_layer_match:
         extracted["layer"] = best_layer_match 
 
+    if extracted["action"] == "load":
+        session_dict = get_all_sessions()
+        best_session_match = find_best_session_match(command, session_dict)
+
+        if best_session_match:
+            # print(f"Loading seesion ID: {best_session_match}")
+            # load_session(best_session_match)
+            # return extracted
+            extracted["value"] = best_session_match
+        else:
+            print("No matching session found to load")
+            #return extracted
+
     return extracted
 
 def get_layer_id(layer_name):
@@ -580,10 +593,12 @@ def command_to_function(command):
         ("mute", True): lambda l: set_video_mute(l, 1),
         ("unmute", True): lambda l: set_video_mute(l, 0),
         ("move", True): lambda l: move_to_region(l, value),
+        ("load", True): load_session(value),
         ("play", True): play_video,
-        ("please", True): play_video,
         ("pause", True): pause_video,
+        ("please", True): play_video,
         ("stop", True): stop_video,
+        
     }
 
     if layer == "all":
@@ -816,6 +831,87 @@ def get_session_list():
     finally:
         client_socket.close()
 
+def get_all_sessions():
+    """
+    Retrieve all sessions, returns dict of names to ID
+    """
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    client_socket.settimeout(2)
+
+    try:
+        auth_command = f"apikey?value={API_KEY}"
+        client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
+
+        api_command = "content/sessionList/get"
+        client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
+        print(f"Sent command: {api_command}")
+
+        start_time = time.time()
+        responses = []
+
+        while time.time() - start_time < 5:
+            try:
+                response, _ = client_socket.recvfrom(65507)
+                response_str = response.decode("utf-8", errors="ignore")
+
+                if "content/sessionList/get?" in response_str:
+                    responses.append(response_str)
+                    break
+
+            except socket.timeout:
+                print("No additional response, retrying...")
+                client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
+
+        session_dict = {}
+        for response in responses:
+            parts = response.split("session={")[1:]
+            for part in parts:
+                session_id = None
+                session_name = "Unnamed Session"
+                fields = part.strip("}").split("+")
+                for field in fields:
+                    if field.startswith("id="):
+                        session_id = field.replace("id=", "").strip()
+                    elif field.startswith("name="):
+                        session_name = field.replace("name=", "").strip()
+                if session_id:
+                    session_dict[session_name] = session_id
+
+        return session_dict
+    
+    except socket.timeout:
+        print("No response received from ICE.")
+        return {}
+    
+    finally:
+        client_socket.close()
+
+def find_best_session_match(doc_text, session_dict):
+    """
+    Uses a sliding window approach to find match starting from highest word count (window size) in dictionary.
+
+    doc_test (str): Command spoken by user.
+    session_dict (dict): A dictionary containing session_name as key, and session_id as value.
+    """
+    words = clean_text(doc_text).split()
+    max_n = max(len(name.split()) for name in session_dict) if session_dict else 1
+
+    for window_size in range(max_n, 0, -1):
+        for i in range(len(words) - window_size + 1):
+            candidate = " ".join(words[i : i + window_size]).strip()
+
+            if candidate in session_dict:
+                return session_dict[candidate]
+            
+            match, score, _ = process.extractOne(
+                candidate, session_dict.keys(), scorer = fuzz.token_sort_ratio
+            )
+            if score >= 70:
+                return session_dict[match]
+    
+    return None
+
+
 def listen_for_all_layer_changes():
     """
     Authenticates, fetches initial layer list, subscribes to name updates,
@@ -981,6 +1077,25 @@ def select_layer(layer_id):
         client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
 
         api_command = f"layer/select?id={layer_id}"
+        client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
+        print(f"Sent command: {api_command}")
+
+    finally:
+        client_socket.close()
+
+def load_session(session_id):
+    """
+    Loads a session.
+
+    session_id: ID of session to be loaded
+    """
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    try:
+        auth_command = f"apikey?value={API_KEY}"
+        client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
+
+        api_command = f"session/load?id={session_id}"
         client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
         print(f"Sent command: {api_command}")
 
@@ -1431,4 +1546,5 @@ if __name__ == "__main__":
     #listen_for_wake_word()
     #listen_for_all_layer_changes()    
     # print(sd.query_devices())
+    
     start_background_services()
