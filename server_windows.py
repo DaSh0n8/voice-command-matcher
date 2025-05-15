@@ -79,20 +79,25 @@ def listen_for_wake_word():
         if keyword_index >= 0:
             print("Wake word detected!")
             
-            # Hide sleep icon
-            set_layer_visibility("f96bebb1-c7c1-018c-f671-9dce83fc8388", False)
             command_loop() 
             # Hide processing icon
-            set_layer_visibility("ce12da2f-fb36-1b92-f654-27d4ed2cadf7", False)
+            if "processing" in layer_dict: set_layer_visibility(layer_dict["processing"], False)
+            if "tooltip" in layer_dict: set_layer_visibility(layer_dict["tooltip"], False)
 
-            # Display sleep icon
-            set_layer_visibility("f96bebb1-c7c1-018c-f671-9dce83fc8388", True)
             print("Returning to sleep mode...")
 
 current_session_id = None
 current_session_name = None
 layer_dict = {}
 layer_volume_dict = {} 
+
+with open(os.devnull, 'w') as fnull:
+    with redirect_stdout(fnull), redirect_stderr(fnull):
+        model = WhisperModel("medium", device="cuda", compute_type="float16")
+
+with open(os.devnull, 'w') as fnull:
+    with redirect_stdout(fnull), redirect_stderr(fnull):
+        vad_model, utils = torch.hub.load("snakers4/silero-vad", "silero_vad", force_reload=False)
 
 def start_background_services():
     """
@@ -126,7 +131,6 @@ def command_loop():
     while True:
         total_start = time.time()
         speech_string = speech_to_text()
-        print("Reached")
         if not speech_string.strip():
             print("No speech detected. Returning to sleep mode.")
             break
@@ -175,15 +179,10 @@ def record_until_silence(filename="live_audio.wav", threshold=0.80, silence_dura
         set_layer_volume(layer, 0.05)
 
     print("Listening...")
-    # Hide
-    set_layer_visibility("f87fc8c1-b763-d236-8f36-3547a4c8540a", False)
-    # Display listening icon
-    set_layer_visibility("60bcc1b7-7d58-1885-4b23-c77bb1f5be26", True)
 
-    # Load Silero VAD model and set up a resampler (from 44100 to 16000 Hz)
-    with open(os.devnull, 'w') as fnull:
-        with redirect_stdout(fnull), redirect_stderr(fnull):
-            vad_model, utils = torch.hub.load("snakers4/silero-vad", "silero_vad", force_reload=False)
+    # Display listening icon
+    if "listening" in layer_dict: set_layer_visibility(layer_dict["listening"], True)
+    if "tooltip" in layer_dict: set_layer_visibility(layer_dict["tooltip"], True)    
     
     vad_model.eval()
     resampler = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=16000)
@@ -226,9 +225,9 @@ def record_until_silence(filename="live_audio.wav", threshold=0.80, silence_dura
                 if silence_counter >= silence_limit:
                     print("Silence detected, stopping recording.")
                     # Hide Listening icon
-                    set_layer_visibility("60bcc1b7-7d58-1885-4b23-c77bb1f5be26", False)
+                    if "listening" in layer_dict: set_layer_visibility(layer_dict["listening"], False)
                     # Display Processing icon
-                    set_layer_visibility("ce12da2f-fb36-1b92-f654-27d4ed2cadf7", True)
+                    if "processing" in layer_dict: set_layer_visibility(layer_dict["processing"], True)
                     break
 
     full_audio = np.concatenate(recording, axis=0)
@@ -293,10 +292,6 @@ def speech_to_text():
     filename = record_until_silence()
     t1 = time.time()
 
-    with open(os.devnull, 'w') as fnull:
-        with redirect_stdout(fnull), redirect_stderr(fnull):
-            model = WhisperModel("small", device="cuda", compute_type="float16")
-
     segments, _ = model.transcribe(filename, language="en")
 
     full_text = " ".join(segment.text for segment in segments).strip()
@@ -319,7 +314,7 @@ action_patterns = [
     [{"LOWER": "add"}], [{"LOWER": "create"}], [{"LOWER": "shift"}], [{"LOWER": "align"}],
     [{"LOWER": "bring"}], [{"LOWER": "put"}], [{"LOWER": "position"}], [{"LOWER": "reposition"}],
     [{"LOWER": "place"}], [{"LOWER": "front"}], [{"LOWER": "back"}], [{"LOWER": "forward"}],
-    [{"LOWER": "backward"}], [{"LOWER": "load"}], 
+    [{"LOWER": "backward"}], [{"LOWER": "load"}], [{"LOWER": "loathe"}], [{"LOWER": "lode"}],
     
     # For Scale
     [{"LOWER": "minimize"}], [{"LOWER": "shrink"}], [{"LOWER": "minimized"}],
@@ -449,7 +444,7 @@ def find_best_layer_match(doc_text, layer_dict):
             match, score, _ = process.extractOne(
                 candidate, layer_dict.keys(), scorer=fuzz.token_sort_ratio
             )
-            if score >= 70:
+            if score >= 60:
                 return layer_dict[match]
 
     return None
@@ -524,9 +519,6 @@ def parse_command(command):
         best_session_match = find_best_session_match(command, session_dict)
 
         if best_session_match:
-            # print(f"Loading seesion ID: {best_session_match}")
-            # load_session(best_session_match)
-            # return extracted
             extracted["value"] = best_session_match
         else:
             print("No matching session found to load")
@@ -594,11 +586,12 @@ def command_to_function(command):
         ("unmute", True): lambda l: set_video_mute(l, 0),
         ("move", True): lambda l: move_to_region(l, value),
         ("load", True): load_session(value),
+        ("loathe", True): load_session(value),
+        ("lode", True): load_session(value),
         ("play", True): play_video,
         ("pause", True): pause_video,
         ("please", True): play_video,
         ("stop", True): stop_video,
-        
     }
 
     if layer == "all":
@@ -877,6 +870,7 @@ def get_all_sessions():
                 if session_id:
                     session_dict[session_name] = session_id
 
+        print(session_dict.keys())
         return session_dict
     
     except socket.timeout:
@@ -906,7 +900,7 @@ def find_best_session_match(doc_text, session_dict):
             match, score, _ = process.extractOne(
                 candidate, session_dict.keys(), scorer = fuzz.token_sort_ratio
             )
-            if score >= 70:
+            if score >= 60:
                 return session_dict[match]
     
     return None
