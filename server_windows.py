@@ -307,6 +307,7 @@ matcher = Matcher(nlp.vocab)
 # Action patterns to be recognized 
 action_patterns = [
     [{"LOWER": "hide"}], [{"LOWER": "unhide"}], [{"LOWER": "move"}], [{"LOWER": "duplicate"}],
+    [{"LOWER": "clone"}], [{"LOWER": "reset"}], [{"LOWER": "home"}],
     [{"LOWER": "remove"}], [{"LOWER": "delete"}], [{"LOWER": "start"}], [{"LOWER": "save"}], 
     [{"LOWER": "select"}], [{"LOWER": "pin"}], [{"LOWER": "unpin"}], [{"LOWER": "snap"}], 
     [{"LOWER": "lock"}], [{"LOWER": "enable"}], [{"LOWER": "disable"}], [{"LOWER": "add"}],
@@ -314,7 +315,8 @@ action_patterns = [
     [{"LOWER": "add"}], [{"LOWER": "create"}], [{"LOWER": "shift"}], [{"LOWER": "align"}],
     [{"LOWER": "bring"}], [{"LOWER": "put"}], [{"LOWER": "position"}], [{"LOWER": "reposition"}],
     [{"LOWER": "place"}], [{"LOWER": "front"}], [{"LOWER": "back"}], [{"LOWER": "forward"}],
-    [{"LOWER": "backward"}], [{"LOWER": "load"}], [{"LOWER": "loathe"}], [{"LOWER": "lode"}],
+    [{"LOWER": "backward"}], [{"LOWER": "backwards"}],
+    [{"LOWER": "load"}], [{"LOWER": "loathe"}], [{"LOWER": "lode"}],
     
     # For Scale
     [{"LOWER": "minimize"}], [{"LOWER": "shrink"}], [{"LOWER": "minimized"}],
@@ -363,6 +365,8 @@ value_patterns = [
     [{"LOWER": "half"}, {"LOWER": "size"}],
     [{"LOWER": "session"}],
     [{"LOWER": "region"}, {"LIKE_NUM": True}],
+    [{"LOWER": "one"}], [{"LOWER": "two"}], [{"LOWER": "three"}], [{"LOWER": "four"}], [{"LOWER": "five"}],
+    [{"LOWER": "six"}], [{"LOWER": "seven"}], [{"LOWER": "eight"}], [{"LOWER": "nine"}], [{"LOWER": "ten"}],
 ]
 matcher.add("VALUE", value_patterns)
 
@@ -455,7 +459,23 @@ def process_numeric_value(value):
 
     value (str): Raw extracted value.
     """
+    number_dict = {
+        "one": 1,
+        "two": 2,
+        "three": 3,
+        "four": 4,
+        "five": 5,
+        "six": 6,
+        "seven": 7,
+        "eight": 8,
+        "nine": 9,
+        "ten": 10
+    }
+
     value = value.strip().replace("%", "").replace("px", "").replace("pixels", "")
+
+    if value in number_dict:
+        value = number_dict[value]
     
     try:
         return float(value)
@@ -464,6 +484,7 @@ def process_numeric_value(value):
 
 
 def normalize_percentage(value):
+
     """
     Converts a value to 0–1 scale.
 
@@ -514,7 +535,7 @@ def parse_command(command):
     if best_layer_match:
         extracted["layer"] = best_layer_match 
 
-    if extracted["action"] == "load":
+    if extracted["action"] == "load" or extracted["action"] == "loathe" or extracted["action"] == "lode":
         session_dict = get_all_sessions()
         best_session_match = find_best_session_match(command, session_dict)
 
@@ -570,10 +591,14 @@ def command_to_function(command):
         ("select", True): select_layer,
         ("remove", True): remove_layer,
         ("delete", True): remove_layer,
+        ("clone", True): clone_layer,
+        ("duplicate", True): clone_layer,
+        ("reset", True): reset_layer,
         ("front", True): move_layer_front,
         ("back", True): move_layer_back,
-        ("forward", True): lambda l: move_layer(l, 1, "up"),
-        ("backward", True): lambda l: move_layer(l, 1, "down"),
+        ("forward", True): lambda l: move_layer(l, value, "up"),
+        ("backward", True): lambda l: move_layer(l, value, "down"),
+        ("backwards", True): lambda l: move_layer(l, value, "down"),
         ("pin", True): lambda l: set_layer_pin(l, True),
         ("unpin", True): lambda l: set_layer_pin(l, False),
         ("lock", True): lambda l: set_layer_lock(l, True),
@@ -585,13 +610,14 @@ def command_to_function(command):
         ("mute", True): lambda l: set_video_mute(l, 1),
         ("unmute", True): lambda l: set_video_mute(l, 0),
         ("move", True): lambda l: move_to_region(l, value),
-        ("load", True): load_session(value),
-        ("loathe", True): load_session(value),
-        ("lode", True): load_session(value),
         ("play", True): play_video,
         ("pause", True): pause_video,
         ("please", True): play_video,
         ("stop", True): stop_video,
+        ("load", False): lambda: load_session(value),
+        ("loathe", False): lambda: load_session(value),
+        ("lode", False): lambda: load_session(value),
+        ("home", False): lambda: remove_unpinned
     }
 
     if layer == "all":
@@ -676,6 +702,10 @@ def command_to_function(command):
         if layer != "all":
             CURRENT_LAYER = layer
         return func(layer)
+    
+    func_layerless = action_map.get((action, False))
+    if func_layerless:
+        return func_layerless()
 
     if action == "zoom" and layer:
         zoom_value = value if value else 25
@@ -870,7 +900,6 @@ def get_all_sessions():
                 if session_id:
                     session_dict[session_name] = session_id
 
-        print(session_dict.keys())
         return session_dict
     
     except socket.timeout:
@@ -888,20 +917,26 @@ def find_best_session_match(doc_text, session_dict):
     session_dict (dict): A dictionary containing session_name as key, and session_id as value.
     """
     words = clean_text(doc_text).split()
-    max_n = max(len(name.split()) for name in session_dict) if session_dict else 1
+
+    session_dict_cleaned = {
+        clean_text(name): session_id for name, session_id in session_dict.items()
+    }
+
+    max_n = max(len(name.split()) for name in session_dict_cleaned) if session_dict_cleaned else 1
 
     for window_size in range(max_n, 0, -1):
         for i in range(len(words) - window_size + 1):
             candidate = " ".join(words[i : i + window_size]).strip()
 
-            if candidate in session_dict:
-                return session_dict[candidate]
+            if candidate in session_dict_cleaned:
+                return session_dict_cleaned[candidate]
             
             match, score, _ = process.extractOne(
-                candidate, session_dict.keys(), scorer = fuzz.token_sort_ratio
+                candidate, session_dict_cleaned.keys(), scorer = fuzz.token_sort_ratio
             )
+            print(candidate, match, score)
             if score >= 60:
-                return session_dict[match]
+                return session_dict_cleaned[match]
     
     return None
 
@@ -1091,7 +1126,7 @@ def load_session(session_id):
 
         api_command = f"session/load?id={session_id}"
         client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
-        print(f"Sent command: {api_command}")
+        print(f"Sent commandz: {api_command}")
 
     finally:
         client_socket.close()
@@ -1109,6 +1144,61 @@ def remove_layer(layer_id):
         client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
 
         api_command = f"layer/remove?id={layer_id}"
+        client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
+        print(f"Sent command: {api_command}")
+
+    finally:
+        client_socket.close()
+
+def remove_unpinned():
+    """
+    Removes all unpinned layers.
+    """
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    try:
+        auth_command = f"apikey?value={API_KEY}"
+        client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
+
+        api_command = f"layerList/removeUnpinned"
+        client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
+        print(f"Sent command: {api_command}")
+
+    finally:
+        client_socket.close()
+
+def clone_layer(layer_id):
+    """
+    Clones a layer.
+
+    layer_id: Layer id for layer to be clone.
+    """
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    try:
+        auth_command = f"apikey?value={API_KEY}"
+        client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
+
+        api_command = f"layer/clone?id={layer_id}"
+        client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
+        print(f"Sent command: {api_command}")
+
+    finally:
+        client_socket.close()
+
+def reset_layer(layer_id):
+    """
+    Resets a layer's geometry.
+
+    layer_id: Layer id for layer to be reset.
+    """
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    try:
+        auth_command = f"apikey?value={API_KEY}"
+        client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
+
+        api_command = f"layer/geometry/reset?id={layer_id}"
         client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
         print(f"Sent command: {api_command}")
 
@@ -1349,6 +1439,8 @@ def move_layer(layer_id, times, direction):
     times (int): How many times the layer should be moved.
     direction (string): Layer moving up or down.
     """
+    if not times:
+        times = 1
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
     try:
@@ -1360,7 +1452,7 @@ def move_layer(layer_id, times, direction):
         else:
             api_command = f"layer/moveDown/?id={layer_id}"
 
-        for _ in range(times):
+        for _ in range(int(times)):
             client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
         print(f"Sent command: {api_command}")
 
@@ -1380,7 +1472,7 @@ def add_layer(type):
         auth_command = f"apikey?value={API_KEY}"
         client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
 
-        api_command = f"layer/add?args=Image+id=123123123+index=4+type={type}"
+        api_command = f"layer/add?args=Image+type={type}"
         client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
         print(f"Sent command: {api_command}")
 
