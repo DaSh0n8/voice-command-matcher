@@ -617,7 +617,7 @@ def command_to_function(command):
         ("load", False): lambda: load_session(value),
         ("loathe", False): lambda: load_session(value),
         ("lode", False): lambda: load_session(value),
-        ("home", False): lambda: remove_unpinned
+        ("home", False): lambda: remove_unpinned()
     }
 
     if layer == "all":
