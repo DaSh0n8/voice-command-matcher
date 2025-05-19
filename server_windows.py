@@ -306,7 +306,7 @@ matcher = Matcher(nlp.vocab)
 
 # Action patterns to be recognized 
 action_patterns = [
-    [{"LOWER": "hide"}], [{"LOWER": "unhide"}], [{"LOWER": "move"}], [{"LOWER": "duplicate"}],
+    [{"LOWER": "hide"}], [{"LOWER": "unhide"}], [{"LOWER": "duplicate"}],
     [{"LOWER": "clone"}], [{"LOWER": "reset"}], [{"LOWER": "home"}],
     [{"LOWER": "remove"}], [{"LOWER": "delete"}], [{"LOWER": "start"}], [{"LOWER": "save"}], 
     [{"LOWER": "select"}], [{"LOWER": "pin"}], [{"LOWER": "unpin"}], [{"LOWER": "snap"}], 
@@ -315,7 +315,7 @@ action_patterns = [
     [{"LOWER": "add"}], [{"LOWER": "create"}], [{"LOWER": "shift"}], [{"LOWER": "align"}],
     [{"LOWER": "bring"}], [{"LOWER": "put"}], [{"LOWER": "position"}], [{"LOWER": "reposition"}],
     [{"LOWER": "place"}], [{"LOWER": "front"}], [{"LOWER": "back"}], [{"LOWER": "forward"}],
-    [{"LOWER": "backward"}], [{"LOWER": "backwards"}],
+    [{"LOWER": "backward"}], [{"LOWER": "backwards"}], [{"LOWER": "region"}],
     [{"LOWER": "load"}], [{"LOWER": "loathe"}], [{"LOWER": "lode"}],
     
     # For Scale
@@ -438,6 +438,9 @@ def find_best_layer_match(doc_text, layer_dict):
     words = clean_text(doc_text).split()
     max_n = max(len(layer.split()) for layer in layer_dict) if layer_dict else 1  
 
+    best_match = None
+    best_score = 0
+
     for window_size in range(max_n, 0, -1):
         for i in range(len(words) - window_size + 1):
             candidate = " ".join(words[i : i + window_size]).strip()
@@ -448,8 +451,13 @@ def find_best_layer_match(doc_text, layer_dict):
             match, score, _ = process.extractOne(
                 candidate, layer_dict.keys(), scorer=fuzz.token_sort_ratio
             )
-            if score >= 60:
-                return layer_dict[match]
+
+            if score > best_score and score >= 65:
+                best_match = match
+                best_score = score
+                
+    if best_match:
+        return layer_dict[best_match]
 
     return None
 
@@ -609,7 +617,7 @@ def command_to_function(command):
         ("hide", True): lambda l: set_layer_visibility(l, False),
         ("mute", True): lambda l: set_video_mute(l, 1),
         ("unmute", True): lambda l: set_video_mute(l, 0),
-        ("move", True): lambda l: move_to_region(l, value),
+        ("region", True): lambda l: move_to_region(l, value),
         ("play", True): play_video,
         ("pause", True): pause_video,
         ("please", True): play_video,
@@ -924,6 +932,9 @@ def find_best_session_match(doc_text, session_dict):
 
     max_n = max(len(name.split()) for name in session_dict_cleaned) if session_dict_cleaned else 1
 
+    best_match = None
+    best_score = 0
+
     for window_size in range(max_n, 0, -1):
         for i in range(len(words) - window_size + 1):
             candidate = " ".join(words[i : i + window_size]).strip()
@@ -934,9 +945,13 @@ def find_best_session_match(doc_text, session_dict):
             match, score, _ = process.extractOne(
                 candidate, session_dict_cleaned.keys(), scorer = fuzz.token_sort_ratio
             )
-            print(candidate, match, score)
-            if score >= 60:
-                return session_dict_cleaned[match]
+
+            if score > best_score and score >= 70:
+                best_match = match
+                best_score = score
+
+    if best_match:
+        return session_dict_cleaned[best_match]
     
     return None
 
@@ -948,6 +963,13 @@ def listen_for_all_layer_changes():
     Updates global `layer_dict` when an update is detected.
     """
     global layer_dict
+    icon_paths = {
+        "processing": r"C:\Users\igloo\Desktop\processing.jpg",
+        "listening": r"C:\Users\igloo\Desktop\listening.jpg",
+        "tooltip": r"C:\Users\igloo\Desktop\tooltip.png",
+    }   
+
+    added_icon_layers = set()
 
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     client_socket.settimeout(5)
@@ -986,10 +1008,19 @@ def listen_for_all_layer_changes():
                         layer_type = type_value[0] if type_value else "Unknown"
 
                         # If name is defaulted to "Layer1", use type instead
-                        if raw_name == "Layer1":
+                        if raw_name == "Layer1" or raw_name == "Layer2" or raw_name == "Layer3":
                             raw_name = layer_type[0] + layer_type[1:].lower()
 
                         cleaned_name = clean_text(remove_file_extension(raw_name))
+                        
+                        if cleaned_name == "image":
+                            for name, path in icon_paths.items():
+                                if name not in layer_dict:
+                                    print(f"Assigning '{name}' to layer {layer_id}")
+                                    set_layer_image_path(layer_id, path)
+                                    rename_layer(layer_id, name)
+                                    layer_dict[name] = layer_id
+                                    break
 
                         current_layer_ids.add(layer_id)
 
@@ -1006,6 +1037,7 @@ def listen_for_all_layer_changes():
                             client_socket.sendto(sub_cmd.encode(), SERVER_ADDRESS)
                             subscribed_to_name_ids.add(layer_id)
                             print(f"Subscribed to name changes for {layer_id}")
+                    
 
                     # Detect added/removed layers
                     added = current_layer_ids - known_layer_ids
@@ -1028,6 +1060,12 @@ def listen_for_all_layer_changes():
                                 del id_to_name[layer_id]
 
                     known_layer_ids = current_layer_ids
+
+                    for name in icon_paths:
+                        if name not in layer_dict and name not in added_icon_layers:
+                            print(f"Adding {name}")
+                            add_layer("image")
+                            added_icon_layers.add(name)
 
                 # Handle name changes
                 elif "layer/general/name/get" in response_str:
@@ -1112,6 +1150,37 @@ def select_layer(layer_id):
     finally:
         client_socket.close()
 
+def set_layer_image_path(layer_id, path):
+    """
+    Helper function for setting image path for icons and tooltip
+    """
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        auth_command = f"apikey?value={API_KEY}"
+        client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
+
+        api_command = f"layer/contextual/filepath/set?id={layer_id}+path={path}"
+        client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
+        print(f"Sent command: {api_command}")
+    finally:
+        client_socket.close()
+
+def rename_layer(layer_id, new_name):
+    """
+    Helper function for renaming icon/tooltip layer
+    """
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        auth_command = f"apikey?value={API_KEY}"
+        client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
+
+        api_command = f"layer/general/name/set?id={layer_id}+value={new_name}"
+        client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
+        print(f"Sent command: {api_command}")
+    finally:
+        client_socket.close()
+
+
 def load_session(session_id):
     """
     Loads a session.
@@ -1126,7 +1195,7 @@ def load_session(session_id):
 
         api_command = f"session/load?id={session_id}"
         client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
-        print(f"Sent commandz: {api_command}")
+        print(f"Sent command: {api_command}")
 
     finally:
         client_socket.close()
@@ -1319,12 +1388,13 @@ def move_to_region(layer_id, region_index):
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
     try:
-        auth_command = f"apikey?value={API_KEY}"
-        client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
+        if region_index:
+            auth_command = f"apikey?value={API_KEY}"
+            client_socket.sendto(auth_command.encode(), SERVER_ADDRESS)
 
-        api_command = f"layer/geometry/moveToRegion?id={layer_id}+layoutIndex=0+regionIndex={region_index}"
-        client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
-        print(f"Sent command: {api_command}")
+            api_command = f"layer/geometry/moveToRegion?id={layer_id}+layoutIndex=0+regionIndex={region_index}"
+            client_socket.sendto(api_command.encode(), SERVER_ADDRESS)
+            print(f"Sent command: {api_command}")
 
     finally:
         client_socket.close()
