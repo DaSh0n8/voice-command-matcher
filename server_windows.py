@@ -176,7 +176,8 @@ def record_until_silence(filename="live_audio.wav", threshold=0.80, silence_dura
     original_volumes = {layer_id: layer_volume_dict.get(layer_id, 0.5) for layer_id in layer_dict.values()}
 
     for layer in layer_dict.values():
-        set_layer_volume(layer, 0.05)
+        if original_volumes[layer] > 0.05:
+            set_layer_volume(layer, 0.05)
 
     print("Listening...")
 
@@ -963,13 +964,6 @@ def listen_for_all_layer_changes():
     Updates global `layer_dict` when an update is detected.
     """
     global layer_dict
-    icon_paths = {
-        "processing": r"C:\Users\igloo\Desktop\processing.jpg",
-        "listening": r"C:\Users\igloo\Desktop\listening.jpg",
-        "tooltip": r"C:\Users\igloo\Desktop\tooltip.png",
-    }   
-
-    added_icon_layers = set()
 
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     client_socket.settimeout(5)
@@ -1008,19 +1002,10 @@ def listen_for_all_layer_changes():
                         layer_type = type_value[0] if type_value else "Unknown"
 
                         # If name is defaulted to "Layer1", use type instead
-                        if raw_name == "Layer1" or raw_name == "Layer2" or raw_name == "Layer3":
+                        if raw_name == "Layer1":
                             raw_name = layer_type[0] + layer_type[1:].lower()
 
                         cleaned_name = clean_text(remove_file_extension(raw_name))
-                        
-                        if cleaned_name == "image":
-                            for name, path in icon_paths.items():
-                                if name not in layer_dict:
-                                    print(f"Assigning '{name}' to layer {layer_id}")
-                                    set_layer_image_path(layer_id, path)
-                                    rename_layer(layer_id, name)
-                                    layer_dict[name] = layer_id
-                                    break
 
                         current_layer_ids.add(layer_id)
 
@@ -1037,7 +1022,6 @@ def listen_for_all_layer_changes():
                             client_socket.sendto(sub_cmd.encode(), SERVER_ADDRESS)
                             subscribed_to_name_ids.add(layer_id)
                             print(f"Subscribed to name changes for {layer_id}")
-                    
 
                     # Detect added/removed layers
                     added = current_layer_ids - known_layer_ids
@@ -1061,12 +1045,6 @@ def listen_for_all_layer_changes():
 
                     known_layer_ids = current_layer_ids
 
-                    for name in icon_paths:
-                        if name not in layer_dict and name not in added_icon_layers:
-                            print(f"Adding {name}")
-                            add_layer("image")
-                            added_icon_layers.add(name)
-
                 # Handle name changes
                 elif "layer/general/name/get" in response_str:
                     parts = response_str.split("+")
@@ -1085,7 +1063,7 @@ def listen_for_all_layer_changes():
                             del layer_dict[old_name]
                         id_to_name[layer_id] = cleaned_name
                         layer_dict[cleaned_name] = layer_id
-
+                print(layer_dict)
             except socket.timeout:
                 continue
 
