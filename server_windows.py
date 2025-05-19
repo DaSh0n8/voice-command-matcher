@@ -115,6 +115,29 @@ def start_background_services():
 
     volume_thread.start()
 
+    system_icons = {
+        "processing": r"C:\Users\igloo\Desktop\processing.jpg",
+        "listening": r"C:\Users\igloo\Desktop\listening.jpg",
+        "tooltip": r"C:\Users\igloo\Desktop\tooltip.png"
+    }
+
+    time.sleep(10)
+    for name, path in system_icons.items():
+        if name not in layer_dict:
+            add_layer("image")
+            time.sleep(0.5)
+            id = get_layer_id("image")
+            set_layer_image_path(id, path)
+            rename_layer(id, name)    
+            if name == "tooltip":
+                set_layer_scale(id ,0.75)
+                set_layer_position(id, 0.055, 0.46)
+            else:
+                set_layer_scale(id, 0.3)
+                set_layer_position(id, 0.136, 0.15)
+            set_layer_pin(id, True)
+            set_layer_visibility(id, False) 
+    
     try:
         while True:
             time.sleep(1)
@@ -176,14 +199,18 @@ def record_until_silence(filename="live_audio.wav", threshold=0.80, silence_dura
     original_volumes = {layer_id: layer_volume_dict.get(layer_id, 0.5) for layer_id in layer_dict.values()}
 
     for layer in layer_dict.values():
-        if original_volumes[layer] > 0.05:
+        if original_volumes[layer] and original_volumes[layer] > 0.05:
             set_layer_volume(layer, 0.05)
 
     print("Listening...")
 
     # Display listening icon
-    if "listening" in layer_dict: set_layer_visibility(layer_dict["listening"], True)
-    if "tooltip" in layer_dict: set_layer_visibility(layer_dict["tooltip"], True)    
+    if "listening" in layer_dict: 
+        set_layer_visibility(layer_dict["listening"], True)
+        move_layer_front(layer_dict["listening"])
+    if "tooltip" in layer_dict: 
+        set_layer_visibility(layer_dict["tooltip"], True)  
+        move_layer_front(layer_dict["tooltip"])  
     
     vad_model.eval()
     resampler = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=16000)
@@ -228,7 +255,9 @@ def record_until_silence(filename="live_audio.wav", threshold=0.80, silence_dura
                     # Hide Listening icon
                     if "listening" in layer_dict: set_layer_visibility(layer_dict["listening"], False)
                     # Display Processing icon
-                    if "processing" in layer_dict: set_layer_visibility(layer_dict["processing"], True)
+                    if "processing" in layer_dict: 
+                        set_layer_visibility(layer_dict["processing"], True)
+                        move_layer_front(layer_dict["processing"])
                     break
 
     full_audio = np.concatenate(recording, axis=0)
@@ -1063,7 +1092,6 @@ def listen_for_all_layer_changes():
                             del layer_dict[old_name]
                         id_to_name[layer_id] = cleaned_name
                         layer_dict[cleaned_name] = layer_id
-                print(layer_dict)
             except socket.timeout:
                 continue
 
