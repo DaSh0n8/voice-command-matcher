@@ -263,7 +263,7 @@ def record_until_silence(filename="live_audio.wav", threshold=0.80, silence_dura
     full_audio = np.concatenate(recording, axis=0)
     wav.write(filename, sample_rate, full_audio)
 
-    for name, layer_id in layer_dict.items():
+    for layer_id in list(layer_dict.values()):
         original_volume = original_volumes.get(layer_id, 0.5)
         set_layer_volume(layer_id, original_volume)
 
@@ -346,7 +346,7 @@ action_patterns = [
     [{"LOWER": "bring"}], [{"LOWER": "put"}], [{"LOWER": "position"}], [{"LOWER": "reposition"}],
     [{"LOWER": "place"}], [{"LOWER": "front"}], [{"LOWER": "back"}], [{"LOWER": "forward"}],
     [{"LOWER": "backward"}], [{"LOWER": "backwards"}], [{"LOWER": "region"}],
-    [{"LOWER": "load"}], [{"LOWER": "loathe"}], [{"LOWER": "lode"}],
+    [{"LOWER": "load"}], [{"LOWER": "loathe"}], [{"LOWER": "lode"}], [{"LOWER": "lord"}],
     
     # For Scale
     [{"LOWER": "minimize"}], [{"LOWER": "shrink"}], [{"LOWER": "minimized"}],
@@ -655,6 +655,7 @@ def command_to_function(command):
         ("load", False): lambda: load_session(value),
         ("loathe", False): lambda: load_session(value),
         ("lode", False): lambda: load_session(value),
+        ("lord", False): lambda: load_session(value),
         ("home", False): lambda: remove_unpinned()
     }
 
