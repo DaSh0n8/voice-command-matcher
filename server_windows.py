@@ -21,10 +21,14 @@ import os, sys
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
+def get_resource_path(relative_path):
+    base_path = getattr(sys, '_MEIPASS', Path(".").resolve())
+    return str(Path(base_path) / relative_path)
 
 # Load configuration from config.json
 def load_config():
-    with open("config.json", "r") as file:
+    config_path = get_resource_path("config.json")
+    with open(config_path, "r") as file:
         return json.load(file)
 
 # Initialize config variables
@@ -36,11 +40,13 @@ ACCESS_KEY = config["ACCESS_KEY"]
 SERVER_ADDRESS = (IGLOO_SERVER_IP, IGLOO_SERVER_PORT)
 
 # Path to wake word model
-WAKE_WORD_PATH = "Hey-Igloo_en_windows_v3_0_0/Hey-Igloo_en_windows_v3_0_0.ppn" 
+WAKE_WORD_PATH = get_resource_path("Hey-Igloo_en_windows_v3_0_0/Hey-Igloo_en_windows_v3_0_0.ppn")
 
 CURRENT_LAYER = None
 
 LAST_FN = None
+
+initial_layer_load_complete = threading.Event()
 
 porcupine = pvporcupine.create(
     access_key=ACCESS_KEY,  
@@ -116,7 +122,7 @@ def start_background_services():
 
     volume_thread.start()
 
-    ICON_DIR = Path("icons").resolve()
+    ICON_DIR = Path(get_resource_path("icons"))
 
     system_icons = {
         "processing": ICON_DIR/"processing.jpg",
@@ -124,7 +130,8 @@ def start_background_services():
         "tooltip": ICON_DIR/"tooltip.png"
     }
 
-    time.sleep(10)
+    initial_layer_load_complete.wait(timeout=10)
+    
     for name, path in system_icons.items():
         if name not in layer_dict:
             add_layer("image")
@@ -579,7 +586,7 @@ def parse_command(command):
     if best_layer_match:
         extracted["layer"] = best_layer_match 
 
-    if extracted["action"] == "load" or extracted["action"] == "loathe" or extracted["action"] == "lode":
+    if extracted["action"] == "load" or extracted["action"] == "loathe" or extracted["action"] == "lode" or extracted["action"] == "lord":
         session_dict = get_all_sessions()
         best_session_match = find_best_session_match(command, session_dict)
 
@@ -1080,6 +1087,8 @@ def listen_for_all_layer_changes():
                                 del id_to_name[layer_id]
 
                     known_layer_ids = current_layer_ids
+                    if not initial_layer_load_complete.is_set():
+                        initial_layer_load_complete.set()
 
                 # Handle name changes
                 elif "layer/general/name/get" in response_str:
