@@ -19,6 +19,7 @@ import torchaudio
 import torch.nn.functional as F
 import os, sys
 from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
 
 
 # Load configuration from config.json
@@ -115,10 +116,12 @@ def start_background_services():
 
     volume_thread.start()
 
+    ICON_DIR = Path("icons").resolve()
+
     system_icons = {
-        "processing": r"C:\Users\igloo\Desktop\processing.jpg",
-        "listening": r"C:\Users\igloo\Desktop\listening.jpg",
-        "tooltip": r"C:\Users\igloo\Desktop\tooltip.png"
+        "processing": ICON_DIR/"processing.jpg",
+        "listening": ICON_DIR/"listening.jpg",
+        "tooltip": ICON_DIR/"tooltip.png"
     }
 
     time.sleep(10)
@@ -127,14 +130,17 @@ def start_background_services():
             add_layer("image")
             time.sleep(0.5)
             id = get_layer_id("image")
-            set_layer_image_path(id, path)
+            
+            set_layer_image_path(id, str(path))
             rename_layer(id, name)    
+
             if name == "tooltip":
                 set_layer_scale(id ,0.75)
                 set_layer_position(id, 0.055, 0.46)
             else:
                 set_layer_scale(id, 0.3)
                 set_layer_position(id, 0.136, 0.15)
+
             set_layer_pin(id, True)
             set_layer_visibility(id, False) 
     
