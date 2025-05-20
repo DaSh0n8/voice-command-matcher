@@ -977,7 +977,7 @@ def find_best_session_match(doc_text, session_dict):
                 candidate, session_dict_cleaned.keys(), scorer = fuzz.token_sort_ratio
             )
 
-            if score > best_score and score >= 70:
+            if score > best_score and score >= 60:
                 best_match = match
                 best_score = score
 
