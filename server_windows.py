@@ -20,6 +20,7 @@ import torch.nn.functional as F
 import os, sys
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from playsound import playsound
 
 def get_resource_path(relative_path):
     base_path = getattr(sys, '_MEIPASS', Path(".").resolve())
@@ -70,6 +71,14 @@ audio_stream = pa.open(
     frames_per_buffer=porcupine.frame_length
 )
 
+def play_sound(name):
+    def play():
+        icon_dir = Path(get_resource_path("Icons"))
+        sound_path = icon_dir / name
+        playsound(str(sound_path))
+
+    threading.Thread(target=play, daemon=True).start()
+
 def listen_for_wake_word():
     """
     Continuously listens for the wake word using Porcupine.
@@ -97,6 +106,7 @@ def listen_for_wake_word():
             if "processing" in layer_dict: set_layer_visibility(layer_dict["processing"], False)
             if "tooltip" in layer_dict: set_layer_visibility(layer_dict["tooltip"], False)
 
+            play_sound("Stopped.wav")
             print("Returning to sleep mode...")
 
 current_session_id = None
@@ -230,7 +240,8 @@ def record_until_silence(filename="live_audio.wav", threshold=0.80, silence_dura
     if "tooltip" in layer_dict: 
         set_layer_visibility(layer_dict["tooltip"], True)  
         move_layer_front(layer_dict["tooltip"])  
-    
+    play_sound("Listening.wav")
+
     vad_model.eval()
     resampler = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=16000)
 
@@ -272,7 +283,8 @@ def record_until_silence(filename="live_audio.wav", threshold=0.80, silence_dura
                 if silence_counter >= silence_limit:
                     print("Silence detected, stopping recording.")
                     # Hide Listening icon
-                    if "listening" in layer_dict: set_layer_visibility(layer_dict["listening"], False)
+                    if "listening" in layer_dict: 
+                        set_layer_visibility(layer_dict["listening"], False)
                     # Display Processing icon
                     if "processing" in layer_dict: 
                         set_layer_visibility(layer_dict["processing"], True)
@@ -350,7 +362,6 @@ def speech_to_text():
     print(f"[Timing] Transcription took: {t2 - t1:.2f} seconds")
     return full_text.lower()
 
-print("pre matcher")
 try:
     # For build
     # nlp = spacy.load(get_resource_path("en_core_web_sm"))
@@ -922,7 +933,7 @@ def get_session_list():
 
     finally:
         client_socket.close()
-print("Middle")
+
 def get_all_sessions():
     """
     Retrieve all sessions, returns dict of names to ID
@@ -1737,14 +1748,12 @@ def get_regions():
     finally:
         client_socket.close()
 
-print("all funcs loaded")
 
 if __name__ == "__main__":
     #listen_for_wake_word()
     #listen_for_all_layer_changes()    
     # print(sd.query_devices())
     try:
-        print("starting server")
         start_background_services()
     except Exception as e:
         import traceback
