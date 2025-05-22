@@ -33,6 +33,7 @@ def load_config():
 
 # Initialize config variables
 config = load_config()
+
 IGLOO_SERVER_IP = config["IGLOO_SERVER_IP"]
 IGLOO_SERVER_PORT = config["IGLOO_SERVER_PORT"]
 API_KEY = config["API_KEY"]
@@ -40,7 +41,9 @@ ACCESS_KEY = config["ACCESS_KEY"]
 SERVER_ADDRESS = (IGLOO_SERVER_IP, IGLOO_SERVER_PORT)
 
 # Path to wake word model
-WAKE_WORD_PATH = get_resource_path("Hey-Igloo_en_windows_v3_0_0/Hey-Igloo_en_windows_v3_0_0.ppn")
+WAKE_WORD_PATH = str(Path(get_resource_path(
+    "Hey-Igloo_en_windows_v3_0_0/Hey-Igloo_en_windows_v3_0_0.ppn"
+)).resolve())
 
 CURRENT_LAYER = None
 
@@ -48,10 +51,13 @@ LAST_FN = None
 
 initial_layer_load_complete = threading.Event()
 
-porcupine = pvporcupine.create(
-    access_key=ACCESS_KEY,  
-    keyword_paths=[WAKE_WORD_PATH]  
-)  
+try:
+    porcupine = pvporcupine.create(
+        access_key=ACCESS_KEY,  
+        keyword_paths=[WAKE_WORD_PATH]  
+    )  
+except Exception as e:
+    print("Error initializing porcupine: ", e)
 
 pa = pyaudio.PyAudio()
 
@@ -189,7 +195,7 @@ def command_loop():
         time.sleep(1)
 
 
-def record_until_silence(filename="live_audio.wav", threshold=0.80, silence_duration=2.0, max_duration=15):
+def record_until_silence(filename="live_audio.wav", threshold=0.80, silence_duration=2.0, max_duration=9):
     """
     Records audio in chunks, using Silero VAD to detect silence.
     The first 3 seconds (initial_grace_chunks) are a grace period where silence is ignored.
@@ -344,8 +350,17 @@ def speech_to_text():
     print(f"[Timing] Transcription took: {t2 - t1:.2f} seconds")
     return full_text.lower()
 
-nlp = spacy.load("en_core_web_sm")
-matcher = Matcher(nlp.vocab)
+print("pre matcher")
+try:
+    # For build
+    # nlp = spacy.load(get_resource_path("en_core_web_sm"))
+
+    # For development
+    nlp = spacy.load("en_core_web_sm")
+    matcher = Matcher(nlp.vocab)
+    print("spacy loaded")
+except Exception as e:
+    print("Error: ", e)
 
 # Action patterns to be recognized 
 action_patterns = [
@@ -359,7 +374,7 @@ action_patterns = [
     [{"LOWER": "bring"}], [{"LOWER": "put"}], [{"LOWER": "position"}], [{"LOWER": "reposition"}],
     [{"LOWER": "place"}], [{"LOWER": "front"}], [{"LOWER": "back"}], [{"LOWER": "forward"}],
     [{"LOWER": "backward"}], [{"LOWER": "backwards"}], [{"LOWER": "region"}],
-    [{"LOWER": "load"}], [{"LOWER": "loathe"}], [{"LOWER": "lode"}], [{"LOWER": "lord"}],
+    [{"LOWER": "load"}], [{"LOWER": "loathe"}], [{"LOWER": "lode"}], [{"LOWER": "lord"}], [{"LOWER": "loads"}],
     
     # For Scale
     [{"LOWER": "minimize"}], [{"LOWER": "shrink"}], [{"LOWER": "minimized"}],
@@ -448,6 +463,7 @@ VOLUME_ACTIONS = (
     "increase the volume", "decrease the volume", "lower volume", "lower the volume"
 )
 
+print("post matcher")
 def clean_text(text):
     """
     Cleans text by removing punctuation (except spaces) and converting to lowercase.
@@ -586,7 +602,7 @@ def parse_command(command):
     if best_layer_match:
         extracted["layer"] = best_layer_match 
 
-    if extracted["action"] == "load" or extracted["action"] == "loathe" or extracted["action"] == "lode" or extracted["action"] == "lord":
+    if extracted["action"] in ["load", "loathe", "lode", "loads", "lord"]:
         session_dict = get_all_sessions()
         best_session_match = find_best_session_match(command, session_dict)
 
@@ -666,6 +682,7 @@ def command_to_function(command):
         ("please", True): play_video,
         ("stop", True): stop_video,
         ("load", False): lambda: load_session(value),
+        ("loads", False): lambda: load_session(value),
         ("loathe", False): lambda: load_session(value),
         ("lode", False): lambda: load_session(value),
         ("lord", False): lambda: load_session(value),
@@ -905,7 +922,7 @@ def get_session_list():
 
     finally:
         client_socket.close()
-
+print("Middle")
 def get_all_sessions():
     """
     Retrieve all sessions, returns dict of names to ID
@@ -1720,9 +1737,16 @@ def get_regions():
     finally:
         client_socket.close()
 
+print("all funcs loaded")
+
 if __name__ == "__main__":
     #listen_for_wake_word()
     #listen_for_all_layer_changes()    
     # print(sd.query_devices())
-    
-    start_background_services()
+    try:
+        print("starting server")
+        start_background_services()
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        input("Press Enter to exit")
