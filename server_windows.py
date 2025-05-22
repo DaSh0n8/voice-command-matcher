@@ -18,9 +18,9 @@ import torch
 import torchaudio
 import torch.nn.functional as F
 import os, sys
+import simpleaudio as sa
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
-from playsound import playsound
 
 def get_resource_path(relative_path):
     base_path = getattr(sys, '_MEIPASS', Path(".").resolve())
@@ -73,9 +73,13 @@ audio_stream = pa.open(
 
 def play_sound(name):
     def play():
-        icon_dir = Path(get_resource_path("Icons"))
-        sound_path = icon_dir / name
-        playsound(str(sound_path))
+        try:
+            icon_dir = Path(get_resource_path("Icons"))
+            sound_path = icon_dir / name
+            wave_obj = sa.WaveObject.from_wave_file(str(sound_path))
+            wave_obj.play()
+        except Exception as e:
+            print("Failed because :", e)
 
     threading.Thread(target=play, daemon=True).start()
 
@@ -239,7 +243,9 @@ def record_until_silence(filename="live_audio.wav", threshold=0.80, silence_dura
         move_layer_front(layer_dict["listening"])
     if "tooltip" in layer_dict: 
         set_layer_visibility(layer_dict["tooltip"], True)  
-        move_layer_front(layer_dict["tooltip"])  
+        move_layer_front(layer_dict["tooltip"]) 
+
+    print("Playing") 
     play_sound("Listening.wav")
 
     vad_model.eval()
