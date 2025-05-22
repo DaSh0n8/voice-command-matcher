@@ -4,7 +4,11 @@ datas = [
     ("config.json", "."),
     ("icons/*", "icons"),
     ("Hey-Igloo_en_windows_v3_0_0/*", "Hey-Igloo_en_windows_v3_0_0"),
-    ("porcupine_resources/windows/*", "pvporcupine/resources/keyword_files/windows")
+    ("porcupine_resources/windows/*", "pvporcupine/resources/keyword_files/windows"),
+
+    ("venv/Lib/site-packages/pvporcupine/lib/windows/amd64/*", "pvporcupine/lib/windows/amd64"),
+    ("venv/Lib/site-packages/pvporcupine/lib/common/*", "pvporcupine/lib/common"),
+    ("venv/Lib/site-packages/en_core_web_sm/en_core_web_sm-3.8.0", "en_core_web_sm")
 ]
 
 a = Analysis(
@@ -28,7 +32,7 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name='server_windows',
-    debug=False,
+    debug=True,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
